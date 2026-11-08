@@ -13,14 +13,21 @@ use sha2::{Digest, Sha256};
 
 /// MailCraft's app registration (public client: an identifier, not a secret).
 pub const DEFAULT_CLIENT_ID: &str = "ca8a6658-b155-4705-8186-a72a35a00f1c";
-/// Asked at sign-in. Contacts.Read came later (address completion): accounts added before it
-/// keep working without it, so sessions are refreshed with [`MAIL_SCOPES`] only.
-pub const SCOPES: &str =
-    "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite Contacts.Read";
+/// Asked at sign-in: the 8 permissions of the app registration (mail, out-of-office, contacts,
+/// calendar, frequent people). Accounts signed in before some of them keep working: sessions
+/// are refreshed with [`MAIL_SCOPES`] only, and each extra part asks for its own token.
+pub const SCOPES: &str = "offline_access User.Read Mail.ReadWrite Mail.Send \
+     MailboxSettings.ReadWrite Contacts.ReadWrite Calendars.ReadWrite People.Read";
 pub const MAIL_SCOPES: &str =
     "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite";
-/// Token for the address book only; fails if the user never consented to it.
-pub const CONTACTS_SCOPES: &str = "offline_access Contacts.Read";
+/// Token for the address book; fails if the user never consented to it.
+pub const CONTACTS_SCOPES: &str = "offline_access Contacts.ReadWrite";
+/// Accounts that consented only to reading contacts (signed in before Contacts.ReadWrite).
+pub const CONTACTS_READ_SCOPES: &str = "offline_access Contacts.Read";
+/// Token for the calendar (for the calendar view to come).
+pub const CALENDAR_SCOPES: &str = "offline_access Calendars.ReadWrite";
+/// Token for the people the user writes to most.
+pub const PEOPLE_SCOPES: &str = "offline_access People.Read";
 
 #[derive(Debug)]
 pub enum AuthError {

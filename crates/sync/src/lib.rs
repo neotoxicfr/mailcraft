@@ -1470,12 +1470,21 @@ impl Runner {
         let Ok(Some(refresh)) = self.store.refresh_token(account_id) else {
             return;
         };
+        // Read-write first; accounts signed in before it was asked for still have read-only.
         let tokens = match auth::refresh(
             &self.http,
             &self.config.client_id,
             &refresh,
             auth::CONTACTS_SCOPES,
-        ) {
+        )
+        .or_else(|_| {
+            auth::refresh(
+                &self.http,
+                &self.config.client_id,
+                &refresh,
+                auth::CONTACTS_READ_SCOPES,
+            )
+        }) {
             Ok(t) => t,
             Err(e) => {
                 log::info!("address book not available: {e}");
