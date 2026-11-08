@@ -880,7 +880,14 @@ impl Runner {
                     Err(e) => Err((false, e.to_string())),
                 }
             } else {
-                match self.try_graph(account_id, |g| g.apply(&op.op())) {
+                let mut r = self.try_graph(account_id, |g| g.apply(&op.op()));
+                // 412: the server was still changing the message (a just-arrived mail gets its
+                // own server-side updates). Seen on a real mailbox; a second try goes through.
+                if matches!(r, Err(GraphError::Api(412, _))) {
+                    std::thread::sleep(Duration::from_secs(2));
+                    r = self.try_graph(account_id, |g| g.apply(&op.op()));
+                }
+                match r {
                     Ok(_) | Err(GraphError::NotFound) => Ok(()),
                     Err(GraphError::Network(e)) => Err((true, e)),
                     Err(e) => Err((false, e.to_string())),

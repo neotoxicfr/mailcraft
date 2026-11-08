@@ -39,10 +39,17 @@ Claude to classify senders when an API key is set (optional).
   Orange, Free, La Poste, SFR, GMX, AOL or any server (filled in from the address). Same
   features as Microsoft accounts; blocking a sender files its new mail in Junk at each sync.
 
+- Everyday features: instant mail for IMAP accounts (IDLE), search filters (`de:`/`from:`,
+  `objet:`/`subject:`, attachments, unread, flagged), a shared inbox across accounts, a
+  conversation view, rules, out-of-office replies (on the server for Microsoft accounts),
+  printing, export as .eml, French and English spell checking, an Outlook-style composer,
+  WCAG AA contrast in both themes. Gmail browser sign-in is ready once a Google Cloud project
+  is set up (`docs/gmail-sign-in.md`).
+
 ## Planned
 
-- Gmail sign-in in the browser (OAuth) instead of an app password.
 - Calendar and contacts.
+- macOS and Linux.
 
 ## Build
 
