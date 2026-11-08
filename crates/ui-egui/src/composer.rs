@@ -154,20 +154,11 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
         });
         ui.add_space(6.0);
     }
+    // Outlook layout: a small bar (attach, detach, close, state), then the big Send button
+    // on the left of the address and subject fields.
     ui.horizontal(|ui| {
-        let send = egui::Button::new(RichText::new(T::Send.get(lang)).color(Color32::WHITE))
-            .fill(c.accent_fill);
-        if ui.add_enabled(!comp.sending, send).clicked() {
-            action = Some(Action::Send);
-        }
         if ui.button(T::Attach.get(lang)).clicked() {
             action = Some(Action::PickAttachments);
-        }
-        if !comp.detached && ui.button(T::Detach.get(lang)).clicked() {
-            action = Some(Action::Detach);
-        }
-        if ui.button(T::Discard.get(lang)).clicked() {
-            action = Some(Action::Close(None));
         }
         if comp.sending {
             ui.spinner();
@@ -175,6 +166,14 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
         } else if comp.draft_id.is_some() && comp.changed_at.is_none() {
             ui.label(RichText::new(T::DraftSaved.get(lang)).weak());
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(T::Discard.get(lang)).clicked() {
+                action = Some(Action::Close(None));
+            }
+            if !comp.detached && ui.button(T::Detach.get(lang)).clicked() {
+                action = Some(Action::Detach);
+            }
+        });
     });
     if let Some(e) = &comp.error {
         ui.colored_label(ui.visuals().error_fg_color, e);
@@ -182,63 +181,73 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
     ui.add_space(4.0);
 
     let mut changed = false;
-    egui::Grid::new(("composer-headers", comp.id))
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            let account = comp.account_id;
-            let mut field = |ui: &mut Ui, label: T, value: &mut String| {
-                let l = ui.label(label.get(lang));
-                let r = ui
-                    .add(TextEdit::singleline(value).desired_width(f32::INFINITY))
-                    .labelled_by(l.id);
-                changed |= r.changed();
-                ui.end_row();
-                // Completion of the address being typed (after the last ';' or ',').
-                if label != T::Subject
-                    && r.has_focus()
-                    && let Some(suggest) = c.suggest
-                {
-                    let cut = value.rfind([';', ',']).map_or(0, |i| i + 1);
-                    let typed = value[cut..].trim().to_owned();
-                    let found = suggest(account, &typed);
-                    if !found.is_empty()
-                        && !found.iter().any(|(_, a)| a.eq_ignore_ascii_case(&typed))
-                    {
-                        ui.label("");
-                        ui.vertical(|ui| {
-                            for (name, addr) in found {
-                                let text = if name.is_empty() {
-                                    addr.clone()
-                                } else {
-                                    format!("{name} <{addr}>")
-                                };
-                                if ui.selectable_label(false, &text).clicked() {
-                                    value.truncate(cut);
-                                    if cut > 0 {
-                                        value.push(' ');
-                                    }
-                                    value.push_str(&text);
-                                    value.push_str("; ");
-                                    changed = true;
-                                    r.request_focus();
-                                }
-                            }
-                        });
+    let rows = if comp.show_bcc { 4.0 } else { 3.0 };
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+        if send_button(ui, c, !comp.sending, rows * 26.0) {
+            action = Some(Action::Send);
+        }
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            egui::Grid::new(("composer-headers", comp.id))
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .min_col_width(48.0)
+                .show(ui, |ui| {
+                    let account = comp.account_id;
+                    let mut field = |ui: &mut Ui, label: T, value: &mut String| {
+                        let l = ui.label(label.get(lang));
+                        let r = ui
+                            .add(TextEdit::singleline(value).desired_width(f32::INFINITY))
+                            .labelled_by(l.id);
+                        changed |= r.changed();
                         ui.end_row();
+                        // Completion of the address being typed (after the last ';' or ',').
+                        if label != T::Subject
+                            && r.has_focus()
+                            && let Some(suggest) = c.suggest
+                        {
+                            let cut = value.rfind([';', ',']).map_or(0, |i| i + 1);
+                            let typed = value[cut..].trim().to_owned();
+                            let found = suggest(account, &typed);
+                            if !found.is_empty()
+                                && !found.iter().any(|(_, a)| a.eq_ignore_ascii_case(&typed))
+                            {
+                                ui.label("");
+                                ui.vertical(|ui| {
+                                    for (name, addr) in found {
+                                        let text = if name.is_empty() {
+                                            addr.clone()
+                                        } else {
+                                            format!("{name} <{addr}>")
+                                        };
+                                        if ui.selectable_label(false, &text).clicked() {
+                                            value.truncate(cut);
+                                            if cut > 0 {
+                                                value.push(' ');
+                                            }
+                                            value.push_str(&text);
+                                            value.push_str("; ");
+                                            changed = true;
+                                            r.request_focus();
+                                        }
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        }
+                    };
+                    field(ui, T::To, &mut comp.to);
+                    field(ui, T::Cc, &mut comp.cc);
+                    if comp.show_bcc {
+                        field(ui, T::Bcc, &mut comp.bcc);
                     }
-                }
-            };
-            field(ui, T::To, &mut comp.to);
-            field(ui, T::Cc, &mut comp.cc);
-            if comp.show_bcc {
-                field(ui, T::Bcc, &mut comp.bcc);
+                    field(ui, T::Subject, &mut comp.subject);
+                });
+            if !comp.show_bcc && ui.small_button(T::ShowBcc.get(lang)).clicked() {
+                comp.show_bcc = true;
             }
-            field(ui, T::Subject, &mut comp.subject);
         });
-    if !comp.show_bcc && ui.small_button(T::ShowBcc.get(lang)).clicked() {
-        comp.show_bcc = true;
-    }
+    });
     if changed {
         comp.touch();
     }
@@ -469,6 +478,54 @@ pub fn clean_link(url: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Outlook's tall Send button: envelope and label in white on the accent. True when clicked.
+fn send_button(ui: &mut Ui, c: &Ctx<'_>, enabled: bool, height: f32) -> bool {
+    let label = T::Send.get(c.lang);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(72.0, height.max(64.0)), sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    let fill = if !enabled {
+        ui.visuals().widgets.noninteractive.bg_fill
+    } else if response.is_pointer_button_down_on() {
+        c.accent_fill.gamma_multiply(0.8)
+    } else if response.hovered() {
+        c.accent_fill.gamma_multiply(0.9)
+    } else {
+        c.accent_fill
+    };
+    let ink = if enabled {
+        Color32::WHITE
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().rect_filled(rect, 4.0, fill);
+    let icon = egui::Rect::from_center_size(
+        rect.center() - egui::vec2(0.0, 10.0),
+        egui::Vec2::splat(24.0),
+    );
+    crate::icons::Icon::Envelope.paint(ui.painter(), icon, ink);
+    ui.painter().text(
+        rect.center() + egui::vec2(0.0, 16.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(13.0),
+        ink,
+    );
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            5.0,
+            Stroke::new(2.0, c.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response.clicked()
 }
 
 fn text_hash(text: &str) -> u64 {
