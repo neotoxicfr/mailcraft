@@ -24,6 +24,9 @@ pub enum Icon {
     Away,
     Signature,
     Move,
+    Bullets,
+    Numbering,
+    Link,
 }
 
 type Line = &'static [(f32, f32)];
@@ -203,6 +206,59 @@ const SIGNATURE: &[Line] = &[
         (0.94, 0.8),
     ],
 ];
+/// Bulleted list: the dots are circles, these are the lines.
+const BULLETS: &[Line] = &[
+    &[(0.32, 0.25), (0.92, 0.25)],
+    &[(0.32, 0.5), (0.92, 0.5)],
+    &[(0.32, 0.75), (0.92, 0.75)],
+];
+/// Numbered list: 1, 2, 3 and the lines.
+const NUMBERING: &[Line] = &[
+    &[(0.08, 0.18), (0.15, 0.13), (0.15, 0.33)],
+    &[
+        (0.07, 0.43),
+        (0.11, 0.39),
+        (0.17, 0.4),
+        (0.18, 0.46),
+        (0.07, 0.58),
+        (0.19, 0.58),
+    ],
+    &[
+        (0.07, 0.66),
+        (0.18, 0.66),
+        (0.12, 0.72),
+        (0.18, 0.76),
+        (0.16, 0.83),
+        (0.07, 0.83),
+    ],
+    &[(0.32, 0.25), (0.92, 0.25)],
+    &[(0.32, 0.5), (0.92, 0.5)],
+    &[(0.32, 0.75), (0.92, 0.75)],
+];
+/// Link: two chain links.
+const LINK: &[Line] = &[
+    &[
+        (0.44, 0.66),
+        (0.3, 0.8),
+        (0.2, 0.8),
+        (0.12, 0.72),
+        (0.12, 0.62),
+        (0.3, 0.44),
+        (0.4, 0.44),
+        (0.47, 0.51),
+    ],
+    &[
+        (0.56, 0.34),
+        (0.7, 0.2),
+        (0.8, 0.2),
+        (0.88, 0.28),
+        (0.88, 0.38),
+        (0.7, 0.56),
+        (0.6, 0.56),
+        (0.53, 0.49),
+    ],
+    &[(0.38, 0.62), (0.62, 0.38)],
+];
 /// Move: a folder with an arrow going out of it.
 const MOVE: &[Line] = &[
     &[
@@ -219,7 +275,7 @@ const MOVE: &[Line] = &[
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 23] = [
         Self::Envelope,
         Self::Trash,
         Self::Archive,
@@ -240,6 +296,9 @@ impl Icon {
         Self::Away,
         Self::Signature,
         Self::Move,
+        Self::Bullets,
+        Self::Numbering,
+        Self::Link,
     ];
 
     fn lines(self) -> &'static [Line] {
@@ -264,6 +323,9 @@ impl Icon {
             Self::Away => AWAY,
             Self::Signature => SIGNATURE,
             Self::Move => MOVE,
+            Self::Bullets => BULLETS,
+            Self::Numbering => NUMBERING,
+            Self::Link => LINK,
         }
     }
 
@@ -307,6 +369,7 @@ impl Icon {
             Self::Analyze => &[(0.4, 0.37, 0.25)],
             Self::AddAccount => &[(0.4, 0.31, 0.17)],
             Self::Away => &[(0.7, 0.68, 0.22)],
+            Self::Bullets => &[(0.15, 0.25, 0.05), (0.15, 0.5, 0.05), (0.15, 0.75, 0.05)],
             _ => &[],
         }
     }

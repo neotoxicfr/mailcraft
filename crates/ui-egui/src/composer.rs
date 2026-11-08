@@ -188,71 +188,79 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
     ui.add_space(4.0);
 
     let mut changed = false;
-    let rows = if comp.show_bcc { 4.0 } else { 3.0 };
+    let rows = if comp.show_bcc { 5.0 } else { 4.0 };
     ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-        if send_button(ui, c, !comp.sending, rows * 26.0) {
+        if send_button(ui, c, !comp.sending, rows * 30.0 - 6.0) {
             action = Some(Action::Send);
         }
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.vertical(|ui| {
-            egui::Grid::new(("composer-headers", comp.id))
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .min_col_width(48.0)
-                .show(ui, |ui| {
-                    let account = comp.account_id;
-                    let mut field = |ui: &mut Ui, label: T, value: &mut String| {
-                        let l = ui.label(label.get(lang));
-                        let r = ui
-                            .add(TextEdit::singleline(value).desired_width(f32::INFINITY))
-                            .labelled_by(l.id);
-                        changed |= r.changed();
-                        ui.end_row();
-                        // Completion of the address being typed (after the last ';' or ',').
-                        if label != T::Subject
-                            && r.has_focus()
-                            && let Some(suggest) = c.suggest
-                        {
-                            let cut = value.rfind([';', ',']).map_or(0, |i| i + 1);
-                            let typed = value[cut..].trim().to_owned();
-                            let found = suggest(account, &typed);
-                            if !found.is_empty()
-                                && !found.iter().any(|(_, a)| a.eq_ignore_ascii_case(&typed))
-                            {
-                                ui.label("");
-                                ui.vertical(|ui| {
-                                    for (name, addr) in found {
-                                        let text = if name.is_empty() {
-                                            addr.clone()
-                                        } else {
-                                            format!("{name} <{addr}>")
-                                        };
-                                        if ui.selectable_label(false, &text).clicked() {
-                                            value.truncate(cut);
-                                            if cut > 0 {
-                                                value.push(' ');
-                                            }
-                                            value.push_str(&text);
-                                            value.push_str("; ");
-                                            changed = true;
-                                            r.request_focus();
-                                        }
-                                    }
-                                });
-                                ui.end_row();
-                            }
-                        }
+            ui.spacing_mut().item_spacing.y = 6.0;
+            from_row(ui, c, comp);
+            let account = comp.account_id;
+            let mut field = |ui: &mut Ui, label: T, value: &mut String, button: bool| {
+                ui.horizontal(|ui| {
+                    // Outlook's "To…" / "Cc…" buttons in front of the address fields.
+                    let l = if button {
+                        let b = ui.add_sized(
+                            [64.0, 24.0],
+                            egui::Button::new(format!("{}…", label.get(lang))),
+                        );
+                        b.on_hover_text(T::FocusField.get(lang)).id
+                    } else {
+                        ui.add_sized([64.0, 24.0], egui::Label::new(label.get(lang)))
+                            .id
                     };
-                    field(ui, T::To, &mut comp.to);
-                    field(ui, T::Cc, &mut comp.cc);
-                    if comp.show_bcc {
-                        field(ui, T::Bcc, &mut comp.bcc);
+                    let r = underlined(ui, value).labelled_by(l);
+                    if ui.ctx().memory(|m| m.focused()) == Some(l) {
+                        r.request_focus();
                     }
-                    field(ui, T::Subject, &mut comp.subject);
+                    changed |= r.changed();
+                    // Completion of the address being typed (after the last ';' or ',').
+                    if button
+                        && r.has_focus()
+                        && let Some(suggest) = c.suggest
+                    {
+                        let cut = value.rfind([';', ',']).map_or(0, |i| i + 1);
+                        let typed = value[cut..].trim().to_owned();
+                        let found = suggest(account, &typed);
+                        if !found.is_empty()
+                            && !found.iter().any(|(_, a)| a.eq_ignore_ascii_case(&typed))
+                        {
+                            egui::Area::new(r.id.with("complete"))
+                                .fixed_pos(r.rect.left_bottom())
+                                .order(egui::Order::Foreground)
+                                .show(ui.ctx(), |ui| {
+                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                        for (name, addr) in found {
+                                            let text = if name.is_empty() {
+                                                addr.clone()
+                                            } else {
+                                                format!("{name} <{addr}>")
+                                            };
+                                            if ui.selectable_label(false, &text).clicked() {
+                                                value.truncate(cut);
+                                                if cut > 0 {
+                                                    value.push(' ');
+                                                }
+                                                value.push_str(&text);
+                                                value.push_str("; ");
+                                                changed = true;
+                                                r.request_focus();
+                                            }
+                                        }
+                                    });
+                                });
+                        }
+                    }
                 });
-            if !comp.show_bcc && ui.small_button(T::ShowBcc.get(lang)).clicked() {
-                comp.show_bcc = true;
+            };
+            field(ui, T::To, &mut comp.to, true);
+            field(ui, T::Cc, &mut comp.cc, true);
+            if comp.show_bcc {
+                field(ui, T::Bcc, &mut comp.bcc, true);
             }
+            field(ui, T::Subject, &mut comp.subject, false);
         });
     });
     if changed {
@@ -297,11 +305,11 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
     }
 
     if !comp.detached {
-        format_bar(ui, c, comp);
-        ui.separator();
-    } else {
-        ui.add_space(6.0);
+        ui.add_space(4.0);
+        format_bar(ui, c, comp, false);
     }
+    ui.add_space(4.0);
+    ui.separator();
     if let Some(a) = editor(ui, c, comp) {
         action = Some(a);
     }
@@ -322,6 +330,111 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
             });
     }
     action
+}
+
+/// A frameless single-line field with a line under it (Outlook's address and subject fields).
+fn underlined(ui: &mut Ui, value: &mut String) -> egui::Response {
+    let r = ui.add(
+        TextEdit::singleline(value)
+            .frame(egui::Frame::NONE)
+            .desired_width(f32::INFINITY)
+            .margin(egui::Margin::symmetric(4, 4)),
+    );
+    let color = if r.has_focus() {
+        ui.visuals().selection.bg_fill
+    } else {
+        crate::theme::CONTROL_BORDER
+    };
+    ui.painter()
+        .hline(r.rect.x_range(), r.rect.bottom(), Stroke::new(1.0, color));
+    r
+}
+
+/// "From": the sending account; a choice when there are several, until the draft exists on a
+/// server (it belongs to that account then).
+fn from_row(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
+    let lang = c.lang;
+    let accounts = &c.mail.accounts;
+    let current = accounts
+        .iter()
+        .find(|a| a.id == comp.account_id)
+        .map_or_else(String::new, |a| a.email.clone());
+    ui.horizontal(|ui| {
+        let l = ui
+            .add_sized([64.0, 24.0], egui::Label::new(T::From.get(lang)))
+            .id;
+        if accounts.len() > 1 && comp.draft_id.is_none() {
+            egui::ComboBox::from_id_salt(("from", comp.id))
+                .width(ui.available_width().min(360.0))
+                .selected_text(&current)
+                .show_ui(ui, |ui| {
+                    for a in accounts {
+                        ui.selectable_value(&mut comp.account_id, a.id, &a.email);
+                    }
+                })
+                .response
+                .labelled_by(l);
+        } else {
+            ui.label(current).labelled_by(l);
+        }
+        if !comp.show_bcc
+            && ui
+                .add(egui::Button::new(T::ShowBcc.get(lang)).frame(false))
+                .clicked()
+        {
+            comp.show_bcc = true;
+        }
+    });
+}
+
+/// A small ribbon tool: an icon, highlighted when on or hovered, its name as tooltip and for
+/// screen readers.
+fn tool(ui: &mut Ui, icon: crate::icons::Icon, name: &str, on: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, name));
+    paint_tool_bg(ui, rect, &r, on);
+    icon.paint(ui.painter(), rect.shrink(6.0), ui.visuals().text_color());
+    r.on_hover_text(name)
+}
+
+fn paint_tool_bg(ui: &Ui, rect: egui::Rect, r: &egui::Response, on: bool) {
+    let v = ui.visuals();
+    if on {
+        ui.painter()
+            .rect_filled(rect, 4.0, v.selection.bg_fill.gamma_multiply(0.25));
+    } else if r.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, v.widgets.hovered.weak_bg_fill);
+    }
+}
+
+/// Bold / italic / underline: the letter itself, styled.
+fn letter_tool(ui: &mut Ui, letter: &str, name: &str, on: bool, style: u8) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, name));
+    paint_tool_bg(ui, rect, &r, on);
+    let color = ui.visuals().text_color();
+    let mut job = egui::text::LayoutJob::default();
+    let mut format = TextFormat::simple(
+        FontId::new(
+            15.0,
+            if style == 0 {
+                FontFamily::Name("semibold".into())
+            } else {
+                FontFamily::Proportional
+            },
+        ),
+        color,
+    );
+    format.italics = style == 1;
+    if style == 2 {
+        format.underline = Stroke::new(1.0, color);
+    }
+    job.append(letter, 0.0, format);
+    let galley = ui.painter().layout_job(job);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+    r.on_hover_text(name)
 }
 
 /// The ribbon of a message window, like Outlook's "Message" tab: the tab strip in the accent
@@ -358,10 +471,7 @@ fn message_ribbon(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Actio
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
                     crate::shell::group(ui, c, T::GroupBasicText, |ui| {
-                        ui.vertical(|ui| {
-                            ui.add_space(14.0);
-                            format_bar(ui, c, comp);
-                        });
+                        ui.vertical(|ui| format_bar(ui, c, comp, true));
                     });
                     crate::shell::group(ui, c, T::GroupInclude, |ui| {
                         if crate::shell::big_button(
@@ -375,6 +485,19 @@ fn message_ribbon(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Actio
                         .clicked()
                         {
                             action = Some(Action::PickAttachments);
+                        }
+                        if crate::shell::big_button(
+                            ui,
+                            c,
+                            crate::icons::Icon::Link,
+                            T::Link,
+                            true,
+                            "",
+                        )
+                        .on_hover_text("Ctrl+K")
+                        .clicked()
+                        {
+                            comp.link = Some(String::new());
                         }
                     });
                     if comp.sending {
@@ -390,7 +513,9 @@ fn message_ribbon(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Actio
     action
 }
 
-fn format_bar(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
+/// The formatting tools; `ribbon`: on two rows (size and colour above, styles and lists
+/// below) with the link in the Include group.
+fn format_bar(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer, ribbon: bool) {
     let lang = c.lang;
     // Shortcuts work while typing in the editor.
     let (b, i, u, k) = ui.input_mut(|inp| {
@@ -402,52 +527,15 @@ fn format_bar(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
         )
     });
     let current = comp.typing_style();
-    ui.horizontal(|ui| {
-        let toggle = |ui: &mut Ui, text: RichText, on: bool, tip: T| {
-            ui.add(
-                egui::Button::new(text)
-                    .selected(on)
-                    .min_size(egui::vec2(26.0, 22.0)),
-            )
-            .on_hover_text(tip.get(lang))
-            .clicked()
-        };
-        if toggle(
-            ui,
-            RichText::new(T::BoldLetter.get(lang)).strong(),
-            current.bold,
-            T::Bold,
-        ) || b
-        {
-            comp.apply(|s, on| s.bold = on, |s| s.bold);
-        }
-        if toggle(
-            ui,
-            RichText::new(T::ItalicLetter.get(lang)).italics(),
-            current.italic,
-            T::Italic,
-        ) || i
-        {
-            comp.apply(|s, on| s.italic = on, |s| s.italic);
-        }
-        if toggle(
-            ui,
-            RichText::new(T::UnderlineLetter.get(lang)).underline(),
-            current.underline,
-            T::Underline,
-        ) || u
-        {
-            comp.apply(|s, on| s.underline = on, |s| s.underline);
-        }
-        ui.separator();
-        let size_label = |s: Size| match s {
-            Size::Small => T::SizeSmall,
-            Size::Normal => T::SizeNormal,
-            Size::Large => T::SizeLarge,
-            Size::Huge => T::SizeHuge,
-        };
+    let size_label = |s: Size| match s {
+        Size::Small => T::SizeSmall,
+        Size::Normal => T::SizeNormal,
+        Size::Large => T::SizeLarge,
+        Size::Huge => T::SizeHuge,
+    };
+    let size_and_colour = |ui: &mut Ui, comp: &mut Composer| {
         egui::ComboBox::from_id_salt(("size", comp.id))
-            .width(90.0)
+            .width(110.0)
             .selected_text(size_label(current.size).get(lang))
             .show_ui(ui, |ui| {
                 for s in [Size::Small, Size::Normal, Size::Large, Size::Huge] {
@@ -463,8 +551,47 @@ fn format_bar(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
             .widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::ComboBox, true, T::TextSize.get(lang))
             });
-        let color_button = ui.button(T::Color.get(lang));
-        egui::Popup::menu(&color_button).show(|ui| {
+        // Font colour: an "A" over a bar of the current colour, the palette below.
+        let (rect, colour_button) =
+            ui.allocate_exact_size(egui::vec2(34.0, 26.0), egui::Sense::click());
+        colour_button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, T::Color.get(lang))
+        });
+        paint_tool_bg(ui, rect, &colour_button, false);
+        let text = ui.visuals().text_color();
+        let bar = current
+            .color
+            .map_or(Color32::from_rgb(0xC5, 0x0F, 0x1F), |[r, g, b]| {
+                Color32::from_rgb(r, g, b)
+            });
+        ui.painter().text(
+            rect.center() - egui::vec2(5.0, 3.0),
+            egui::Align2::CENTER_CENTER,
+            "A",
+            FontId::new(15.0, FontFamily::Name("semibold".into())),
+            text,
+        );
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                rect.left_bottom() + egui::vec2(5.0, -7.0),
+                egui::vec2(16.0, 4.0),
+            ),
+            0.0,
+            bar,
+        );
+        // Small arrow: this palette opens below.
+        let tip = rect.right_center() - egui::vec2(6.0, 0.0);
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                tip + egui::vec2(-3.0, -1.5),
+                tip + egui::vec2(3.0, -1.5),
+                tip + egui::vec2(0.0, 2.0),
+            ],
+            text,
+            Stroke::NONE,
+        ));
+        let colour_button = colour_button.on_hover_text(T::Color.get(lang));
+        egui::Popup::menu(&colour_button).show(|ui| {
             ui.horizontal(|ui| {
                 if ui.button(T::DefaultColor.get(lang)).clicked() {
                     comp.apply(|s, _| s.color = None, |s| s.color.is_none());
@@ -491,25 +618,90 @@ fn format_bar(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
                 }
             });
         });
+    };
+    let styles_and_lists = |ui: &mut Ui, comp: &mut Composer| {
+        if letter_tool(
+            ui,
+            T::BoldLetter.get(lang),
+            T::Bold.get(lang),
+            current.bold,
+            0,
+        )
+        .clicked()
+            || b
+        {
+            comp.apply(|s, on| s.bold = on, |s| s.bold);
+        }
+        if letter_tool(
+            ui,
+            T::ItalicLetter.get(lang),
+            T::Italic.get(lang),
+            current.italic,
+            1,
+        )
+        .clicked()
+            || i
+        {
+            comp.apply(|s, on| s.italic = on, |s| s.italic);
+        }
+        if letter_tool(
+            ui,
+            T::UnderlineLetter.get(lang),
+            T::Underline.get(lang),
+            current.underline,
+            2,
+        )
+        .clicked()
+            || u
+        {
+            comp.apply(|s, on| s.underline = on, |s| s.underline);
+        }
         ui.separator();
         let (a, z) = comp.selection;
-        if ui.button(T::BulletList.get(lang)).clicked() {
+        if tool(
+            ui,
+            crate::icons::Icon::Bullets,
+            T::BulletList.get(lang),
+            false,
+        )
+        .clicked()
+        {
             comp.doc.toggle_list(a..z, false);
             comp.touch();
         }
-        if ui.button(T::NumberedList.get(lang)).clicked() {
+        if tool(
+            ui,
+            crate::icons::Icon::Numbering,
+            T::NumberedList.get(lang),
+            false,
+        )
+        .clicked()
+        {
             comp.doc.toggle_list(a..z, true);
             comp.touch();
         }
-        if ui
-            .button(T::Link.get(lang))
-            .on_hover_text("Ctrl+K")
-            .clicked()
-            || k
-        {
+    };
+    if ribbon {
+        ui.horizontal(|ui| size_and_colour(ui, comp));
+        ui.horizontal(|ui| styles_and_lists(ui, comp));
+        if k {
             comp.link = Some(String::new());
         }
-    });
+    } else {
+        ui.horizontal(|ui| {
+            styles_and_lists(ui, comp);
+            ui.separator();
+            size_and_colour(ui, comp);
+            ui.separator();
+            if tool(ui, crate::icons::Icon::Link, T::Link.get(lang), false)
+                .on_hover_text("Ctrl+K")
+                .clicked()
+                || k
+            {
+                comp.link = Some(String::new());
+            }
+        });
+    }
     if let Some(url) = comp.link.as_mut() {
         let mut done = None;
         ui.horizontal(|ui| {
@@ -643,6 +835,7 @@ fn editor(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
         ui.ctx().fonts_mut(|f| f.layout_job(job))
     };
     let out = TextEdit::multiline(text)
+        .frame(egui::Frame::NONE)
         .id_salt(("editor", comp.id))
         .desired_width(f32::INFINITY)
         .desired_rows(14)
