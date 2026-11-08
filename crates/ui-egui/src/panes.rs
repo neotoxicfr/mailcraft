@@ -11,7 +11,7 @@ use mailcraft_store::{Folder, MessageSummary};
 use crate::i18n::{Lang, T};
 use crate::icons::Icon;
 use crate::mail::Status;
-use crate::shell::{Command, Ctx, Dialog, Pick, View};
+use crate::shell::{Command, Ctx, Dialog, Pick, ReplyKind, View};
 use crate::theme;
 
 const FOLDER_ROW: f32 = 24.0;
@@ -106,6 +106,15 @@ pub fn folder_pane(
                 command,
             );
             title.context_menu(|ui| {
+                if ui.button(T::Refresh.get(c.lang)).clicked() {
+                    *command = Some(Command::SyncAll);
+                    ui.close();
+                }
+                if ui.button(T::AccountSettings.get(c.lang)).clicked() {
+                    *command = Some(Command::OpenOptions);
+                    ui.close();
+                }
+                ui.separator();
                 if ui
                     .add_enabled(i > 0, egui::Button::new(T::MoveUp.get(c.lang)))
                     .clicked()
@@ -179,13 +188,17 @@ fn favourites(
         };
         folder_row(ui, c, &all, 1, &mut None, command);
     }
-    // Inbox, Sent, Deleted: in that order, for every account.
-    for role in ["inbox", "sentitems", "deleteditems"] {
-        for f in mail
-            .folders
+    for (email, id) in favourite_list(mail, c.favorites) {
+        let folder = mail
+            .accounts
             .iter()
-            .filter(|f| f.role.as_deref() == Some(role))
-        {
+            .find(|a| a.email.eq_ignore_ascii_case(&email))
+            .and_then(|a| {
+                mail.folders
+                    .iter()
+                    .find(|f| f.account_id == a.id && f.id == id)
+            });
+        if let Some(f) = folder {
             folder_row(ui, c, f, 1, dialog, command);
         }
     }
@@ -207,6 +220,30 @@ fn favourites(
         };
         folder_row(ui, c, &screen, 1, &mut None, command);
     }
+}
+
+/// The favourites as (account address, folder id): the user's list, or by default each
+/// account's Inbox, Sent Items and Deleted Items (in that order, account by account).
+pub fn favourite_list(
+    mail: &crate::mail::Mail,
+    chosen: Option<&[(String, String)]>,
+) -> Vec<(String, String)> {
+    if let Some(list) = chosen {
+        return list.to_vec();
+    }
+    let mut out = Vec::new();
+    for role in ["inbox", "sentitems", "deleteditems"] {
+        for f in mail
+            .folders
+            .iter()
+            .filter(|f| f.role.as_deref() == Some(role))
+        {
+            if let Some(a) = mail.accounts.iter().find(|a| a.id == f.account_id) {
+                out.push((a.email.to_lowercase(), f.id.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// A small triangle: pointing down when open, right when folded.
@@ -435,7 +472,81 @@ fn folder_row_with(
         });
     }
     let lang = c.lang;
+    let virtual_folder = f.id == crate::mail::UNIFIED || f.id == crate::mail::SCREENER;
     response.context_menu(|ui| {
+        if virtual_folder {
+            if ui.button(T::Refresh.get(lang)).clicked() {
+                *command = Some(Command::SyncAll);
+                ui.close();
+            }
+            return;
+        }
+        let mut pick = |cmd: Command, ui: &mut Ui| {
+            *command = Some(cmd);
+            ui.close();
+        };
+        if ui.button(T::MarkAllRead.get(lang)).clicked() {
+            pick(
+                Command::MarkFolderRead {
+                    account_id: f.account_id,
+                    folder_id: f.id.clone(),
+                },
+                ui,
+            );
+        }
+        let permanent = matches!(f.role.as_deref(), Some("deleteditems" | "junkemail"));
+        if ui.button(T::EmptyFolder.get(lang)).clicked() {
+            *dialog = Some(Dialog::ConfirmEmpty {
+                account_id: f.account_id,
+                folder_id: f.id.clone(),
+                name: f.name.clone(),
+                permanent,
+            });
+            ui.close();
+        }
+        if ui.button(T::Refresh.get(lang)).clicked() {
+            pick(Command::SyncAll, ui);
+        }
+        ui.separator();
+        let favourite = c
+            .mail
+            .accounts
+            .iter()
+            .find(|a| a.id == f.account_id)
+            .is_some_and(|a| {
+                favourite_list(c.mail, c.favorites)
+                    .iter()
+                    .any(|(e, id)| e.eq_ignore_ascii_case(&a.email) && *id == f.id)
+            });
+        let label = if favourite {
+            T::RemoveFavorite
+        } else {
+            T::AddFavorite
+        };
+        if ui.button(label.get(lang)).clicked() {
+            pick(
+                Command::ToggleFavorite {
+                    account_id: f.account_id,
+                    folder_id: f.id.clone(),
+                },
+                ui,
+            );
+        }
+        let has_children = c
+            .mail
+            .folders
+            .iter()
+            .any(|x| x.account_id == f.account_id && x.parent_id.as_deref() == Some(&f.id));
+        if has_children && ui.button(T::SortSubfolders.get(lang)).clicked() {
+            pick(
+                Command::SortSubfolders {
+                    account_id: f.account_id,
+                    parent: f.id.clone(),
+                },
+                ui,
+            );
+        }
+        ui.separator();
         if movable {
             for (up, label) in [(true, T::MoveUp), (false, T::MoveDown)] {
                 if ui.button(label.get(lang)).clicked() {
@@ -946,12 +1057,47 @@ fn message_row(
             }
             ui.close();
         };
-        if ui.button(T::MarkReadUnread.get(lang)).clicked() {
-            pick(Some(Command::ToggleRead), ui);
+        for (kind, label) in [
+            (ReplyKind::Reply, T::Reply),
+            (ReplyKind::ReplyAll, T::ReplyAll),
+            (ReplyKind::Forward, T::Forward),
+        ] {
+            if ui.button(label.get(lang).replace('\n', " ")).clicked() {
+                pick(Some(Command::Reply(kind)), ui);
+            }
         }
-        if ui.button(T::Flag.get(lang)).clicked() {
-            pick(Some(Command::ToggleFlag), ui);
+        ui.separator();
+        let (read_label, read) = if m.is_read {
+            (T::MarkUnread, false)
+        } else {
+            (T::MarkRead, true)
+        };
+        if ui.button(read_label.get(lang)).clicked() {
+            pick(Some(Command::MarkRead(read)), ui);
         }
+        ui.menu_button(T::FollowUp.get(lang), |ui| {
+            if ui.button(T::FlagMessage.get(lang)).clicked() {
+                pick(Some(Command::MarkFlag(true)), ui);
+            }
+            if ui.button(T::ClearFlag.get(lang)).clicked() {
+                pick(Some(Command::MarkFlag(false)), ui);
+            }
+        });
+        ui.separator();
+        ui.menu_button(T::FindRelated.get(lang), |ui| {
+            if ui.button(T::FromThisSender.get(lang)).clicked() {
+                pick(Some(Command::FindRelated { sender: true }), ui);
+            }
+            if ui.button(T::InThisConversation.get(lang)).clicked() {
+                pick(Some(Command::FindRelated { sender: false }), ui);
+            }
+        });
+        ui.menu_button(T::Rules.get(lang), |ui| {
+            let text = format!("{} {}…", T::AlwaysMoveFrom.get(lang), m.from_addr);
+            if ui.button(text).clicked() {
+                pick(Some(Command::RuleFromSender), ui);
+            }
+        });
         ui.menu_button(T::MoveTo.get(lang), |ui| {
             if let Some(cmd) = crate::shell::folder_menu(ui, c, m.account_id) {
                 pick(Some(cmd), ui);
@@ -962,6 +1108,26 @@ fn message_row(
         {
             pick(Some(Command::Archive), ui);
         }
+        ui.separator();
+        let in_junk = c.mail.folders.iter().any(|f| {
+            f.account_id == m.account_id
+                && f.id == m.folder_id
+                && f.role.as_deref() == Some("junkemail")
+        });
+        ui.menu_button(T::JunkMenu.get(lang), |ui| {
+            if ui.button(T::BlockSender.get(lang)).clicked() {
+                pick(Some(Command::BlockSender), ui);
+            }
+            if ui.button(T::NeverBlockSender.get(lang)).clicked() {
+                pick(Some(Command::NeverBlock { domain: false }), ui);
+            }
+            if ui.button(T::NeverBlockDomain.get(lang)).clicked() {
+                pick(Some(Command::NeverBlock { domain: true }), ui);
+            }
+            if in_junk && ui.button(T::NotJunk.get(lang)).clicked() {
+                pick(Some(Command::NotJunk), ui);
+            }
+        });
         ui.separator();
         if ui.button(T::Print.get(lang)).clicked() {
             pick(Some(Command::Print), ui);

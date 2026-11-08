@@ -169,6 +169,9 @@ pub struct FolderLayout {
     pub folders: std::collections::BTreeMap<String, Vec<String>>,
     /// Folded entries: `fav`, `a:<address>`, `f:<address>:<folder id>`.
     pub folded: std::collections::BTreeSet<String>,
+    /// Favourites chosen by the user: (account address, folder id). `None`: the default,
+    /// each account's Inbox, Sent Items and Deleted Items.
+    pub favorites: Option<Vec<(String, String)>>,
 }
 
 impl FolderLayout {

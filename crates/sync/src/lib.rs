@@ -64,6 +64,13 @@ pub enum Request {
         items: Vec<(String, String)>,
         dir: PathBuf,
     },
+    /// Everything in a folder (all dates, on the server) to Deleted Items, or deleted for
+    /// good with `permanent` (Deleted Items, Junk).
+    EmptyFolder {
+        account_id: i64,
+        folder_id: String,
+        permanent: bool,
+    },
     /// The out-of-office reply was changed: set it on Microsoft servers too.
     SetAway {
         away: Away,
@@ -571,6 +578,54 @@ impl Runner {
                 Ok(())
             }
             Request::SetAway { away } => self.set_away(Some(away)),
+            Request::EmptyFolder {
+                account_id,
+                folder_id,
+                permanent,
+            } => {
+                let dest = if permanent {
+                    None
+                } else {
+                    Some(self.role_folder(account_id, "deleteditems", emit)?)
+                };
+                if dest.as_deref() == Some(folder_id.as_str()) {
+                    return Ok(());
+                }
+                if self.is_imap(account_id) {
+                    let folder = folder_id.clone();
+                    self.with_imap(account_id, |s| s.empty(&folder, dest.as_deref()))?;
+                } else {
+                    let ids = self.with_graph(account_id, |g| g.folder_message_ids(&folder_id))?;
+                    for (i, id) in ids.iter().enumerate() {
+                        let op = match &dest {
+                            Some(d) => Op::Move { id, dest: d },
+                            None => Op::Delete { id },
+                        };
+                        match self.try_graph(account_id, |g| g.apply(&op)) {
+                            Ok(_) | Err(GraphError::NotFound) => {}
+                            Err(e) => return Err(e.to_string()),
+                        }
+                        if i % 20 == 19 {
+                            self.serve_urgent(emit);
+                        }
+                    }
+                }
+                // The local copy follows: the folder emptied, Deleted Items filled.
+                let local: Vec<String> = self
+                    .store
+                    .messages(account_id, &folder_id, "", usize::MAX >> 1)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+                self.store
+                    .apply_changes(account_id, &folder_id, &[], &local)
+                    .map_err(|e| e.to_string())?;
+                emit(Event::Changed);
+                self.sync_account(account_id, emit)?;
+                emit(Event::SyncDone);
+                Ok(())
+            }
             Request::Export {
                 account_id,
                 items,

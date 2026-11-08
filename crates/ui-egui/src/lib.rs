@@ -183,6 +183,178 @@ impl MailCraftApp {
         self.dirty = true;
     }
 
+    /// Commands of the right-click menus (messages, folders).
+    fn run_menu(&mut self, command: Command) -> Option<()> {
+        match command {
+            Command::MarkRead(read) => {
+                let selected = self.mail.selected_messages();
+                let account_id = selected.first().map(|m| m.account_id)?;
+                let ids = selected
+                    .iter()
+                    .filter(|m| m.account_id == account_id && m.is_read != read)
+                    .map(|m| m.id.clone())
+                    .collect();
+                self.act(Request::SetRead {
+                    account_id,
+                    ids,
+                    read,
+                });
+            }
+            Command::MarkFlag(flagged) => {
+                let selected = self.mail.selected_messages();
+                let account_id = selected.first().map(|m| m.account_id)?;
+                let ids = selected
+                    .iter()
+                    .filter(|m| m.account_id == account_id && m.flagged != flagged)
+                    .map(|m| m.id.clone())
+                    .collect();
+                self.act(Request::SetFlag {
+                    account_id,
+                    ids,
+                    flagged,
+                });
+            }
+            Command::FindRelated { sender } => {
+                let m = self.mail.selected()?.clone();
+                self.view.search = if sender {
+                    format!("de:{}", m.from_addr)
+                } else {
+                    let key = panes::conversation_key(&m.subject);
+                    format!("objet:\"{}\"", key.replace('"', " "))
+                };
+                self.dirty = true;
+            }
+            Command::RuleFromSender => {
+                let m = self.mail.selected()?.clone();
+                self.view.dialog = Some(shell::Dialog::Rules {
+                    draft: Box::new(automation_ui::RuleDraft {
+                        account_id: m.account_id,
+                        from: m.from_addr.clone(),
+                        ..automation_ui::RuleDraft::default()
+                    }),
+                });
+            }
+            Command::BlockSender => {
+                let m = self.mail.selected()?.clone();
+                let protected = self.settings.get().cleanup.allow_list.clone();
+                self.send(Request::Cleanup {
+                    account_id: m.account_id,
+                    addresses: vec![m.from_addr],
+                    action: mailcraft_sync::CleanAction::Block,
+                    // Asked for this one sender, by hand: done, not simulated.
+                    dry_run: false,
+                    protected,
+                });
+            }
+            Command::NeverBlock { domain } => {
+                let m = self.mail.selected()?.clone();
+                let entry = if domain {
+                    m.from_addr
+                        .rsplit_once('@')
+                        .map_or(String::new(), |d| d.1.to_owned())
+                } else {
+                    m.from_addr.clone()
+                };
+                if !entry.is_empty() {
+                    self.settings.update(|p| {
+                        if !p
+                            .cleanup
+                            .allow_list
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(&entry))
+                        {
+                            p.cleanup.allow_list.push(entry);
+                        }
+                    });
+                }
+            }
+            Command::NotJunk => {
+                self.run(Command::NeverBlock { domain: false });
+                self.move_selection_to_role("inbox");
+            }
+            Command::MarkFolderRead {
+                account_id,
+                folder_id,
+            } => {
+                let b = self.backend.as_ref()?;
+                let ids: Vec<String> = b
+                    .store
+                    .messages(account_id, &folder_id, "", usize::MAX >> 1)
+                    .ok()?
+                    .into_iter()
+                    .filter(|m| !m.is_read)
+                    .map(|m| m.id)
+                    .collect();
+                if !ids.is_empty() {
+                    self.act(Request::SetRead {
+                        account_id,
+                        ids,
+                        read: true,
+                    });
+                }
+            }
+            Command::EmptyFolder {
+                account_id,
+                folder_id,
+                permanent,
+            } => self.send(Request::EmptyFolder {
+                account_id,
+                folder_id,
+                permanent,
+            }),
+            Command::SortSubfolders { account_id, parent } => {
+                let email = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == account_id)?
+                    .email
+                    .to_lowercase();
+                let children: Vec<String> = self
+                    .mail
+                    .folders
+                    .iter()
+                    .filter(|f| {
+                        f.account_id == account_id && f.parent_id.as_deref() == Some(&parent)
+                    })
+                    .map(|f| f.id.clone())
+                    .collect();
+                self.settings.update(|p| {
+                    if let Some(list) = p.folders.folders.get_mut(&email) {
+                        list.retain(|x| !children.contains(x));
+                    }
+                });
+                self.dirty = true;
+            }
+            Command::ToggleFavorite {
+                account_id,
+                folder_id,
+            } => {
+                let current = panes::favourite_list(
+                    &self.mail,
+                    self.settings.get().folders.favorites.as_deref(),
+                );
+                let email = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == account_id)?
+                    .email
+                    .to_lowercase();
+                let key = (email, folder_id);
+                let mut list = current;
+                if let Some(i) = list.iter().position(|k| *k == key) {
+                    list.remove(i);
+                } else {
+                    list.push(key);
+                }
+                self.settings.update(|p| p.folders.favorites = Some(list));
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
     /// Opens the shown message, laid out for paper, in the browser's print dialog.
     fn print(&mut self) {
         let (Some(m), Some(body)) = (self.mail.selected().cloned(), self.mail.body.clone()) else {
@@ -334,6 +506,7 @@ impl MailCraftApp {
                 conversations: prefs.appearance.conversations,
                 own_words: &prefs.spell_words,
                 folded: &prefs.folders.folded,
+                favorites: prefs.folders.favorites.as_deref(),
                 suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
             };
             shell::show(ui, &c, &mut self.view, &mut next)
@@ -524,6 +697,17 @@ impl MailCraftApp {
                 });
             }
             Command::Print => self.print(),
+            cmd @ (Command::MarkRead(_)
+            | Command::MarkFlag(_)
+            | Command::FindRelated { .. }
+            | Command::RuleFromSender
+            | Command::BlockSender
+            | Command::NeverBlock { .. }
+            | Command::NotJunk
+            | Command::MarkFolderRead { .. }
+            | Command::EmptyFolder { .. }
+            | Command::SortSubfolders { .. }
+            | Command::ToggleFavorite { .. }) => self.run_menu(cmd)?,
             Command::ToggleFold { key } => {
                 self.settings.update(|p| p.folders.toggle(&key));
             }
@@ -1255,6 +1439,7 @@ impl MailCraftApp {
                         conversations: prefs.appearance.conversations,
                         own_words: &prefs.spell_words,
                         folded: &prefs.folders.folded,
+                        favorites: prefs.folders.favorites.as_deref(),
                         suggest: suggest.map(|f| f as &shell::Suggest<'_>),
                     };
                     egui::CentralPanel::default().show(ui, |ui| {

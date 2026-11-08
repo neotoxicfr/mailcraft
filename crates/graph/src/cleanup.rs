@@ -93,6 +93,26 @@ impl Graph<'_> {
         }
     }
 
+    /// Ids of every message of a folder, all dates (for emptying it).
+    pub fn folder_message_ids(&self, folder_id: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let mut url = format!("{GRAPH}/me/mailFolders/{folder_id}/messages?$select=id&$top=200");
+        loop {
+            let v = self.get(&url)?;
+            out.extend(
+                v["value"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["id"].as_str().map(str::to_owned)),
+            );
+            match v["@odata.nextLink"].as_str() {
+                Some(next) => url = next.to_owned(),
+                None => return Ok(out),
+            }
+        }
+    }
+
     /// Sends a plain-text message without keeping it in Sent Items (unsubscribe by e-mail).
     pub fn send_plain(&self, to: &str, subject: &str, text: &str) -> Result<()> {
         let body = json!({

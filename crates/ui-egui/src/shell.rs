@@ -101,6 +101,13 @@ pub enum Dialog {
         away: Box<mailcraft_sync::Away>,
         until: String,
     },
+    /// Emptying a folder, confirmed first.
+    ConfirmEmpty {
+        account_id: i64,
+        folder_id: String,
+        name: String,
+        permanent: bool,
+    },
     /// Microsoft sign-in, or an IMAP + SMTP account.
     AddAccount {
         form: Box<crate::account_form::Form>,
@@ -141,6 +148,44 @@ pub enum Command {
     /// Out-of-office reply saved: keep it and set it on the servers.
     SaveAway {
         away: Box<mailcraft_sync::Away>,
+    },
+    /// Selected messages marked read (true) or unread.
+    MarkRead(bool),
+    /// Selected messages flagged (true) or not.
+    MarkFlag(bool),
+    /// Search for messages of the selected one's sender (or its conversation).
+    FindRelated {
+        sender: bool,
+    },
+    /// File › Rules opened with a rule for the selected message's sender.
+    RuleFromSender,
+    /// Junk: the sender's mail to Junk, and its new mail from now on.
+    BlockSender,
+    /// Never junk: the sender (or its domain) joins the allow-list.
+    NeverBlock {
+        domain: bool,
+    },
+    /// Not junk: back to the inbox, sender allowed.
+    NotJunk,
+    MarkFolderRead {
+        account_id: i64,
+        folder_id: String,
+    },
+    /// Empty a folder (confirmed): to Deleted Items, or for good with `permanent`.
+    EmptyFolder {
+        account_id: i64,
+        folder_id: String,
+        permanent: bool,
+    },
+    /// Sub-folders back to alphabetical order.
+    SortSubfolders {
+        account_id: i64,
+        parent: String,
+    },
+    /// Show in (or remove from) Favourites.
+    ToggleFavorite {
+        account_id: i64,
+        folder_id: String,
     },
     /// The shown message as a page, in the browser's print dialog.
     Print,
@@ -296,6 +341,8 @@ pub struct Ctx<'a> {
     pub screener: bool,
     /// The list groups messages by conversation.
     pub conversations: bool,
+    /// Favourites chosen by the user (`None`: the default ones).
+    pub favorites: Option<&'a [(String, String)]>,
     /// Folded entries of the folder pane.
     pub folded: &'a std::collections::BTreeSet<String>,
     /// Words the user added to the spell checker.
@@ -456,6 +503,34 @@ fn dialog(
     let modal = egui::Modal::new(egui::Id::unique("mailcraft_dialog")).show(ctx, |ui| {
         ui.set_width(380.0);
         match &current {
+            Dialog::ConfirmEmpty {
+                account_id,
+                folder_id,
+                name,
+                permanent,
+            } => {
+                ui.heading(T::EmptyFolder.get(lang));
+                ui.label(RichText::new(name).strong());
+                ui.label(if *permanent {
+                    T::EmptyForGoodBody.get(lang)
+                } else {
+                    T::EmptyToTrashBody.get(lang)
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::EmptyFolder.get(lang)).clicked() {
+                        result = Some(Command::EmptyFolder {
+                            account_id: *account_id,
+                            folder_id: folder_id.clone(),
+                            permanent: *permanent,
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
             Dialog::ConfirmPermanentDelete { count } => {
                 ui.heading(T::ConfirmPermanentTitle.get(lang));
                 ui.label(format!("{count} — {}", T::ConfirmPermanentBody.get(lang)));

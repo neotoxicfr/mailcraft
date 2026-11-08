@@ -747,6 +747,43 @@ impl Imap {
             .unwrap_or_else(|| "/".into())
     }
 
+    /// Every message of a folder (all dates) moved to `to`, or deleted for good when `to` is
+    /// `None`. Returns how many.
+    pub fn empty(&mut self, mailbox: &str, to: Option<&str>) -> Result<usize> {
+        self.select(mailbox)?;
+        let uids: Vec<u32> = self
+            .session
+            .uid_search("ALL")
+            .map_err(Error::from)?
+            .into_iter()
+            .collect();
+        for chunk in uids.chunks(CHUNK * 5) {
+            let set = uid_set(chunk);
+            match to {
+                Some(dest) if self.can_move => {
+                    self.session.uid_mv(&set, dest).map_err(Error::from)?;
+                }
+                Some(dest) => {
+                    self.session
+                        .uid_copy(&set, quote(dest))
+                        .map_err(Error::from)?;
+                    self.session
+                        .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+                        .map_err(Error::from)?;
+                }
+                None => {
+                    self.session
+                        .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+                        .map_err(Error::from)?;
+                }
+            }
+        }
+        if to.is_none() || !self.can_move {
+            self.session.expunge().map_err(Error::from)?;
+        }
+        Ok(uids.len())
+    }
+
     /// Ids of the messages matching words, in a folder.
     pub fn search(&mut self, mailbox: &str, words: &str) -> Result<(u32, Vec<u32>)> {
         let m = self.select(mailbox)?;

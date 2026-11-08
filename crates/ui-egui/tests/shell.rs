@@ -631,3 +631,34 @@ fn folders_reorder_by_drag_and_drop() {
     let sent = order.iter().position(|x| x == "sent");
     assert!(trash.is_some() && trash < sent, "{order:?}");
 }
+
+#[test]
+fn right_click_menus_offer_outlook_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Example Shop — Votre facture")
+        .click_secondary();
+    h.run();
+    for label in [
+        "Répondre à tous",
+        "Transférer",
+        "Assurer un suivi",
+        "Rechercher les éléments associés",
+        "Courrier indésirable",
+        "Imprimer…",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.get_by_label("Factures").click_secondary();
+    h.run();
+    h.get_by_label("Marquer tout comme lu");
+    h.get_by_label("Afficher dans les favoris");
+    h.get_by_label("Vider le dossier").click();
+    h.run();
+    h.get_by_label(
+        "Tous les messages du dossier, toutes dates confondues, vont dans Éléments supprimés.",
+    );
+}
