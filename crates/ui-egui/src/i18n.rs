@@ -78,6 +78,9 @@ pub enum T {
     SearchHint,
     SearchFilters,
     AllInboxes,
+    GroupLayout,
+    Conversations,
+    ConversationToggle,
     EmptyList,
     ReadingEmpty,
     NoSubject,
@@ -357,6 +360,12 @@ impl T {
             ),
             Self::SearchHint => ("Rechercher dans la boîte aux lettres", "Search the mailbox"),
             Self::AllInboxes => ("Toutes les boîtes de réception", "All inboxes"),
+            Self::GroupLayout => ("Disposition", "Layout"),
+            Self::Conversations => ("Afficher comme conversations", "Show as conversations"),
+            Self::ConversationToggle => (
+                "Déplier ou replier la conversation",
+                "Expand or collapse the conversation",
+            ),
             Self::SearchFilters => (
                 "Filtres : de:nom  objet:mot  pj (pièce jointe)  non-lu  suivi\nExemple : de:alex objet:\"note de frais\" pj",
                 "Filters: from:name  subject:word  has:attachment  is:unread  is:flagged\nExample: from:alex subject:\"expense report\" has:attachment",

@@ -36,6 +36,8 @@ pub enum LangPref {
 pub struct Appearance {
     pub theme: ThemePref,
     pub accent: AccentPref,
+    /// The list groups messages by conversation.
+    pub conversations: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]

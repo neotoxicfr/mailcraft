@@ -358,17 +358,20 @@ pub fn message_list(
     let mut rows: Vec<(f32, Row<'_>)> = Vec::with_capacity(mail.messages.len() + 8);
     let mut y = 0.0;
     let mut last = None;
-    for m in &mail.messages {
-        let group = date_group(m.received, now);
-        if last != Some(group) {
-            rows.push((y, Row::Group(group)));
-            y += GROUP_ROW;
-            last = Some(group);
+    for (m, thread) in list_entries(&mail.messages, c.conversations, &view.expanded) {
+        if thread.depth == 0 {
+            let group = date_group(m.received, now);
+            if last != Some(group) {
+                rows.push((y, Row::Group(group)));
+                y += GROUP_ROW;
+                last = Some(group);
+            }
         }
-        rows.push((y, Row::Message(m)));
+        rows.push((y, Row::Message(m, thread)));
         y += MESSAGE_ROW;
     }
     let total = y;
+    let mut toggle = None;
 
     ScrollArea::vertical()
         .auto_shrink(false)
@@ -397,31 +400,182 @@ pub fn message_list(
                             ui.visuals().weak_text_color(),
                         );
                     }
-                    Row::Message(m) => message_row(ui, c, rect, m, now, command),
+                    Row::Message(m, thread) => {
+                        if message_row(ui, c, rect, m, thread, now, command) {
+                            toggle = Some(thread.key.clone());
+                        }
+                    }
                 }
             }
         });
+    if let Some(key) = toggle
+        && !view.expanded.remove(&key)
+    {
+        view.expanded.insert(key);
+    }
 }
 
 enum Row<'a> {
     Group(T),
-    Message(&'a MessageSummary),
+    Message(&'a MessageSummary, Thread),
 }
 
+/// Where a message sits in the list when it is grouped by conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Thread {
+    /// (account, conversation key).
+    pub key: (i64, String),
+    /// 0: the newest message of its conversation (or any message when not grouped); 1: an
+    /// older message shown under it.
+    pub depth: u8,
+    /// Messages in the conversation (on the head row).
+    pub count: usize,
+    pub expanded: bool,
+    /// Some message of the conversation is unread.
+    pub unread: bool,
+}
+
+/// Conversation key: the subject without its reply/forward prefixes, case and spaces ignored.
+pub fn conversation_key(subject: &str) -> String {
+    let mut s = subject.trim().to_lowercase();
+    loop {
+        let before = s.len();
+        for prefix in ["re", "tr", "fw", "fwd", "aw", "wg", "réf", "ref"] {
+            for sep in [":", " :"] {
+                let p = format!("{prefix}{sep}");
+                if let Some(rest) = s.strip_prefix(&p) {
+                    s = rest.trim_start().to_owned();
+                }
+            }
+        }
+        if s.len() == before {
+            break;
+        }
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The list rows, newest first. Grouped: one row per conversation (its newest message), and its
+/// older messages under it when the conversation is unfolded.
+pub fn list_entries<'a>(
+    messages: &'a [MessageSummary],
+    grouped: bool,
+    expanded: &std::collections::HashSet<(i64, String)>,
+) -> Vec<(&'a MessageSummary, Thread)> {
+    let single = |m: &MessageSummary| Thread {
+        key: (m.account_id, m.id.clone()),
+        depth: 0,
+        count: 1,
+        expanded: false,
+        unread: !m.is_read,
+    };
+    if !grouped {
+        return messages.iter().map(|m| (m, single(m))).collect();
+    }
+    let mut order: Vec<(i64, String)> = Vec::new();
+    let mut members: std::collections::HashMap<(i64, String), Vec<&MessageSummary>> =
+        std::collections::HashMap::new();
+    for m in messages {
+        let subject = conversation_key(&m.subject);
+        // No subject: no conversation to guess, each message stands alone.
+        let key = if subject.is_empty() {
+            (m.account_id, format!("\u{1}{}", m.id))
+        } else {
+            (m.account_id, subject)
+        };
+        let list = members.entry(key.clone()).or_default();
+        if list.is_empty() {
+            order.push(key);
+        }
+        list.push(m);
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    for key in order {
+        let list = &members[&key];
+        let open = expanded.contains(&key);
+        let head = Thread {
+            key: key.clone(),
+            depth: 0,
+            count: list.len(),
+            expanded: open,
+            unread: list.iter().any(|m| !m.is_read),
+        };
+        out.push((list[0], head));
+        if open {
+            for m in &list[1..] {
+                out.push((
+                    *m,
+                    Thread {
+                        key: key.clone(),
+                        depth: 1,
+                        count: 0,
+                        expanded: true,
+                        unread: !m.is_read,
+                    },
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Draws one message row. Returns true when its conversation must be unfolded or folded.
 fn message_row(
     ui: &mut Ui,
     c: &Ctx<'_>,
     rect: Rect,
     m: &MessageSummary,
+    thread: &Thread,
     now: DateTime<Local>,
     command: &mut Option<Command>,
-) {
+) -> bool {
+    let mut toggle = false;
     let id = ui.scope_id().with(("msg", m.account_id, &m.id));
+    // Older messages of an unfolded conversation sit a little to the right.
+    let rect = rect.with_min_x(rect.left() + f32::from(thread.depth) * 14.0);
     let response = ui.interact(rect, id, Sense::click_and_drag());
-    let sender = if m.from_name.is_empty() {
+    if thread.count > 1 {
+        // Unfold/fold triangle at the left, its own target (keyboard and screen readers too).
+        let arrow = Rect::from_min_size(rect.min + vec2(0.0, 2.0), vec2(14.0, 18.0));
+        let r = ui.interact(arrow, id.with("thread"), Sense::click());
+        r.widget_info(|| {
+            WidgetInfo::selected(
+                Role::Button,
+                true,
+                thread.expanded,
+                T::ConversationToggle.get(c.lang),
+            )
+        });
+        let color = ui.visuals().weak_text_color();
+        let center = arrow.center();
+        let points = if thread.expanded {
+            vec![
+                center + vec2(-4.0, -2.0),
+                center + vec2(4.0, -2.0),
+                center + vec2(0.0, 3.0),
+            ]
+        } else {
+            vec![
+                center + vec2(-2.0, -4.0),
+                center + vec2(3.0, 0.0),
+                center + vec2(-2.0, 4.0),
+            ]
+        };
+        ui.painter()
+            .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        toggle = r.clicked();
+    }
+    let sender_name = if m.from_name.is_empty() {
         &m.from_addr
     } else {
         &m.from_name
+    };
+    let counted;
+    let sender = if thread.count > 1 {
+        counted = format!("{sender_name} ({})", thread.count);
+        &counted
+    } else {
+        sender_name
     };
     let subject = if m.subject.is_empty() {
         T::NoSubject.get(c.lang)
@@ -438,7 +592,7 @@ fn message_row(
         selected,
         response.hovered(),
     );
-    let unread = !m.is_read;
+    let unread = thread.unread;
     if unread {
         ui.painter().rect_filled(
             Rect::from_min_size(rect.min + vec2(0.0, 4.0), vec2(3.0, rect.height() - 8.0)),
@@ -448,7 +602,7 @@ fn message_row(
     }
     let text = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
-    let left = rect.left() + 10.0;
+    let left = rect.left() + if thread.count > 1 { 16.0 } else { 10.0 };
     let right = rect.right() - 6.0;
 
     let date = one_line(
@@ -573,6 +727,7 @@ fn message_row(
             pick(Some(Command::Delete { permanent: false }), ui);
         }
     });
+    toggle
 }
 
 fn local(ts: i64) -> DateTime<Local> {
@@ -954,5 +1109,59 @@ mod tests {
         assert_eq!(short_date(at(8, 9), now, Lang::Fr), "09:30");
         assert_eq!(short_date(at(6, 9), now, Lang::Fr), "ven. 09:30");
         assert_eq!(short_date(oct, now, Lang::En), "20/10/2026");
+    }
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::{conversation_key, list_entries};
+    use mailcraft_store::MessageSummary;
+
+    fn msg(id: &str, subject: &str, received: i64, read: bool) -> MessageSummary {
+        MessageSummary {
+            account_id: 1,
+            id: id.into(),
+            folder_id: "in".into(),
+            from_name: "A".into(),
+            from_addr: "a@example.com".into(),
+            subject: subject.into(),
+            preview: String::new(),
+            received,
+            is_read: read,
+            has_attachments: false,
+            flagged: false,
+        }
+    }
+
+    #[test]
+    fn conversation_keys_ignore_reply_prefixes() {
+        assert_eq!(
+            conversation_key("RE : TR: Re:  Réunion   jeudi"),
+            "réunion jeudi"
+        );
+        assert_eq!(conversation_key("Fwd: Photos"), conversation_key("photos"));
+        assert_eq!(conversation_key("Return policy"), "return policy");
+    }
+
+    #[test]
+    fn grouped_list_folds_conversations() {
+        let list = [
+            msg("3", "RE: Réunion", 30, true),
+            msg("2", "Promo", 20, true),
+            msg("1", "Réunion", 10, false),
+            msg("0", "", 5, true),
+            msg("9", "", 4, true),
+        ];
+        let mut open = std::collections::HashSet::new();
+        let rows = list_entries(&list, true, &open);
+        let ids: Vec<&str> = rows.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert_eq!(ids, ["3", "2", "0", "9"]); // empty subjects are not merged
+        assert_eq!((rows[0].1.count, rows[0].1.unread), (2, true));
+        open.insert(rows[0].1.key.clone());
+        let rows = list_entries(&list, true, &open);
+        let ids: Vec<&str> = rows.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert_eq!(ids, ["3", "1", "2", "0", "9"]);
+        assert_eq!(rows[1].1.depth, 1);
+        assert_eq!(list_entries(&list, false, &open).len(), 5);
     }
 }

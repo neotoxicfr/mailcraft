@@ -229,6 +229,7 @@ impl MailCraftApp {
                 save_error: self.save_error.as_deref(),
                 block_images: prefs.privacy.block_remote_images,
                 screener: prefs.cleanup.screener,
+                conversations: prefs.appearance.conversations,
                 suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
             };
             shell::show(ui, &c, &mut self.view, &mut next)
@@ -1062,6 +1063,7 @@ impl MailCraftApp {
                         save_error: None,
                         block_images: prefs.privacy.block_remote_images,
                         screener: prefs.cleanup.screener,
+                        conversations: prefs.appearance.conversations,
                         suggest: suggest.map(|f| f as &shell::Suggest<'_>),
                     };
                     egui::CentralPanel::default().show(ui, |ui| {

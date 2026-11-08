@@ -51,6 +51,8 @@ pub struct View {
     pub claude_key: String,
     pub claude_key_saved: Option<bool>,
     pub cleanup: crate::cleanup::State,
+    /// Conversations unfolded in the list (account id + conversation key).
+    pub expanded: std::collections::HashSet<(i64, String)>,
 }
 
 /// Address completion: (account, typed text) → (name, address) pairs.
@@ -250,6 +252,8 @@ pub struct Ctx<'a> {
     pub block_images: bool,
     /// The screener is on (« À valider » shown).
     pub screener: bool,
+    /// The list groups messages by conversation.
+    pub conversations: bool,
     /// Address completion: (account, typed text) → (name, address).
     pub suggest: Option<&'a Suggest<'a>>,
 }
@@ -1016,6 +1020,12 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
         Tab::View => {
             group(ui, c, T::GroupAppearance, |ui| {
                 appearance_controls(ui, lang, prefs)
+            });
+            group(ui, c, T::GroupLayout, |ui| {
+                ui.checkbox(
+                    &mut prefs.appearance.conversations,
+                    T::Conversations.get(lang),
+                );
             });
         }
     }

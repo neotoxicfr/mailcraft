@@ -61,6 +61,17 @@ fn store(dir: &std::path::Path) -> mailcraft_store::Store {
             true,
         ),
         (
+            "m2b",
+            "Camille Martin",
+            "user@example.com",
+            "RE: Réunion de jeudi",
+            "Jeudi 14 h, c'est parfait pour moi.",
+            5_000,
+            true,
+            false,
+            false,
+        ),
+        (
             "m3",
             "Banque Exemple",
             "contact@banque.example",
@@ -198,5 +209,14 @@ fn shots() {
             h.get_by_label("Nouveau\ncourrier").click();
         }
         save(&mut h, &format!("3-redaction-{theme}"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path().to_owned(), dark);
+        if let Some(app) = h.state_mut() {
+            app.update_prefs(|p| p.appearance.conversations = true);
+        }
+        h.run();
+        h.get_by_label("Déplier ou replier la conversation").click();
+        save(&mut h, &format!("4-conversations-{theme}"));
     }
 }
