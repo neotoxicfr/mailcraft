@@ -38,6 +38,8 @@ pub struct Appearance {
     pub accent: AccentPref,
     /// The list groups messages by conversation.
     pub conversations: bool,
+    /// Messages open in their original look (Edge, scripts off) instead of the simplified view.
+    pub original_view: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]

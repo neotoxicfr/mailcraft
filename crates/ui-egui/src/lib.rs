@@ -580,8 +580,8 @@ impl MailCraftApp {
                 id,
                 pick,
             } => {
-                // Each message opens in the simplified view first.
-                self.view.original = false;
+                // Each message opens in the view chosen in the options.
+                self.view.original = self.settings.get().appearance.original_view;
                 self.select(account_id, &id, pick);
             }
             Command::SelectAll => {

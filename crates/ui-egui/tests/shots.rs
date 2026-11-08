@@ -215,6 +215,14 @@ fn shots() {
         std::thread::sleep(std::time::Duration::from_secs(2));
         h.run();
         save(&mut h, &format!("3-redaction-{theme}"));
+        h.get_by_label("Fermer").click();
+        h.run();
+        if let Some(n) = h.query_by_label("Nouveau courrier") {
+            n.click();
+        } else {
+            h.get_by_label("Nouveau\ncourrier").click();
+        }
+        save(&mut h, &format!("5-nouveau-message-{theme}"));
 
         let dir = tempfile::tempdir().unwrap();
         let mut h = harness(dir.path().to_owned(), dark);

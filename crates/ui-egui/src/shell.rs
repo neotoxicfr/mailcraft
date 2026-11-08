@@ -1206,6 +1206,28 @@ pub fn appearance_controls(ui: &mut Ui, lang: Lang, prefs: &mut Prefs) {
                 .response
                 .labelled_by(label);
             ui.end_row();
+
+            let original = &mut prefs.appearance.original_view;
+            let label = ui.label(T::MessageView.get(lang)).id;
+            let shown = |o: bool| {
+                if o {
+                    T::ViewOriginal.get(lang)
+                } else {
+                    T::ViewSimplified.get(lang)
+                }
+            };
+            ComboBox::from_id_salt("message_view")
+                .width(170.0)
+                .selected_text(shown(*original))
+                .show_ui(ui, |ui| {
+                    for v in [false, true] {
+                        ui.selectable_value(original, v, shown(v));
+                    }
+                })
+                .response
+                .labelled_by(label)
+                .on_hover_text(T::MessageViewHelp.get(lang));
+            ui.end_row();
         });
 }
 
@@ -1235,7 +1257,7 @@ fn lang_label(v: LangPref, lang: Lang) -> &'static str {
 }
 
 /// A ribbon group: its buttons, its caption at the bottom, a separator on the right.
-fn group(ui: &mut Ui, c: &Ctx<'_>, caption: T, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn group(ui: &mut Ui, c: &Ctx<'_>, caption: T, add: impl FnOnce(&mut Ui)) {
     let dark = ui.visuals().dark_mode;
     let color = ui.visuals().weak_text_color();
     let top = ui.max_rect().top();
@@ -1270,7 +1292,7 @@ fn group(ui: &mut Ui, c: &Ctx<'_>, caption: T, add: impl FnOnce(&mut Ui)) {
     ui.add_space(9.0);
 }
 
-fn big_button(
+pub(crate) fn big_button(
     ui: &mut Ui,
     c: &Ctx<'_>,
     icon: Icon,

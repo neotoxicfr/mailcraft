@@ -154,27 +154,34 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
         });
         ui.add_space(6.0);
     }
-    // Outlook layout: a small bar (attach, detach, close, state), then the big Send button
-    // on the left of the address and subject fields.
-    ui.horizontal(|ui| {
-        if ui.button(T::Attach.get(lang)).clicked() {
-            action = Some(Action::PickAttachments);
+    if comp.detached {
+        // A window of its own: Outlook's "Message" ribbon, closed with the window's own button.
+        if let Some(a) = message_ribbon(ui, c, comp) {
+            action = Some(a);
         }
-        if comp.sending {
-            ui.spinner();
-            ui.label(RichText::new(T::Sending.get(lang)).weak());
-        } else if comp.draft_id.is_some() && comp.changed_at.is_none() {
-            ui.label(RichText::new(T::DraftSaved.get(lang)).weak());
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(T::Discard.get(lang)).clicked() {
-                action = Some(Action::Close(None));
+    } else {
+        // Outlook layout: a small bar (attach, detach, close, state), then the big Send button
+        // on the left of the address and subject fields.
+        ui.horizontal(|ui| {
+            if ui.button(T::Attach.get(lang)).clicked() {
+                action = Some(Action::PickAttachments);
             }
-            if !comp.detached && ui.button(T::Detach.get(lang)).clicked() {
-                action = Some(Action::Detach);
+            if comp.sending {
+                ui.spinner();
+                ui.label(RichText::new(T::Sending.get(lang)).weak());
+            } else if comp.draft_id.is_some() && comp.changed_at.is_none() {
+                ui.label(RichText::new(T::DraftSaved.get(lang)).weak());
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(T::Discard.get(lang)).clicked() {
+                    action = Some(Action::Close(None));
+                }
+                if !comp.detached && ui.button(T::Detach.get(lang)).clicked() {
+                    action = Some(Action::Detach);
+                }
+            });
         });
-    });
+    }
     if let Some(e) = &comp.error {
         ui.colored_label(ui.visuals().error_fg_color, e);
     }
@@ -289,8 +296,12 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
         comp.touch();
     }
 
-    format_bar(ui, c, comp);
-    ui.separator();
+    if !comp.detached {
+        format_bar(ui, c, comp);
+        ui.separator();
+    } else {
+        ui.add_space(6.0);
+    }
     if let Some(a) = editor(ui, c, comp) {
         action = Some(a);
     }
@@ -310,6 +321,72 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
                 crate::reader::show(ui, c, &comp.quoted, &images);
             });
     }
+    action
+}
+
+/// The ribbon of a message window, like Outlook's "Message" tab: the tab strip in the accent
+/// colour, then Basic Text (the format bar) and Include (attach a file).
+fn message_ribbon(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
+    let lang = c.lang;
+    let dark = ui.visuals().dark_mode;
+    let mut action = None;
+    // Tab strip.
+    let (strip, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+    ui.painter().rect_filled(strip, 0.0, c.accent_fill);
+    let tab = T::TabMessage.get(lang);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(tab.to_owned(), FontId::proportional(13.0), c.accent);
+    let tab_rect = egui::Rect::from_min_size(
+        strip.min + egui::vec2(8.0, 4.0),
+        egui::vec2(galley.size().x + 24.0, 24.0),
+    );
+    ui.painter()
+        .rect_filled(tab_rect, 0.0, crate::theme::ribbon_fill(dark));
+    ui.painter()
+        .galley(tab_rect.center() - galley.size() / 2.0, galley, c.accent);
+    // Groups.
+    egui::Frame::NONE
+        .fill(crate::theme::ribbon_fill(dark))
+        .inner_margin(egui::Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            // Full width and the groups' height, captions included.
+            ui.set_min_size(egui::vec2(ui.available_width(), 86.0));
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 86.0),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    crate::shell::group(ui, c, T::GroupBasicText, |ui| {
+                        ui.vertical(|ui| {
+                            ui.add_space(14.0);
+                            format_bar(ui, c, comp);
+                        });
+                    });
+                    crate::shell::group(ui, c, T::GroupInclude, |ui| {
+                        if crate::shell::big_button(
+                            ui,
+                            c,
+                            crate::icons::Icon::Paperclip,
+                            T::AttachBig,
+                            true,
+                            "",
+                        )
+                        .clicked()
+                        {
+                            action = Some(Action::PickAttachments);
+                        }
+                    });
+                    if comp.sending {
+                        ui.spinner();
+                        ui.label(RichText::new(T::Sending.get(lang)).weak());
+                    } else if comp.draft_id.is_some() && comp.changed_at.is_none() {
+                        ui.label(RichText::new(T::DraftSaved.get(lang)).weak());
+                    }
+                },
+            );
+        });
+    ui.add_space(6.0);
     action
 }
 

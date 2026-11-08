@@ -138,6 +138,48 @@ pub fn apply(ctx: &Context, appearance: &Appearance) {
             v.weak_text_color = Some(weak);
             // Check boxes and fields must stand out from the pane (3:1).
             v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, CONTROL_BORDER);
+            // Windows 11 controls: a field-coloured button with an outline, a light tint on
+            // hover, darker when pressed or open, rounded corners; menus and drop-down lists
+            // float with a soft shadow.
+            let (field, hover, press) = if dark {
+                (
+                    Color32::from_rgb(0x2D, 0x2D, 0x2D),
+                    Color32::from_rgb(0x38, 0x38, 0x38),
+                    Color32::from_rgb(0x24, 0x24, 0x24),
+                )
+            } else {
+                (
+                    Color32::WHITE,
+                    Color32::from_rgb(0xF5, 0xF5, 0xF5),
+                    Color32::from_rgb(0xE6, 0xE6, 0xE6),
+                )
+            };
+            v.widgets.inactive.weak_bg_fill = field;
+            v.widgets.inactive.bg_fill = field;
+            v.widgets.hovered.weak_bg_fill = hover;
+            v.widgets.hovered.bg_fill = hover;
+            v.widgets.active.weak_bg_fill = press;
+            v.widgets.open.weak_bg_fill = press;
+            v.widgets.open.bg_stroke = egui::Stroke::new(1.0, fill);
+            for w in [
+                &mut v.widgets.noninteractive,
+                &mut v.widgets.inactive,
+                &mut v.widgets.hovered,
+                &mut v.widgets.active,
+                &mut v.widgets.open,
+            ] {
+                w.corner_radius = egui::CornerRadius::same(4);
+            }
+            v.menu_corner_radius = egui::CornerRadius::same(6);
+            v.window_corner_radius = egui::CornerRadius::same(8);
+            v.popup_shadow = egui::epaint::Shadow {
+                offset: [0, 4],
+                blur: 14,
+                spread: 0,
+                color: Color32::from_black_alpha(if dark { 110 } else { 45 }),
+            };
+            style.spacing.button_padding = egui::vec2(10.0, 4.0);
+            style.spacing.interact_size.y = 24.0;
             if dark {
                 v.panel_fill = DARK_PANEL;
             } else {
