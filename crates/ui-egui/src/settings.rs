@@ -100,6 +100,8 @@ pub struct Prefs {
     pub startup: Startup,
     /// What MailCraft does with new mail by itself.
     pub rules: Vec<mailcraft_sync::Rule>,
+    /// Words added to the spell checker (names, jargon).
+    pub spell_words: Vec<String>,
     pub away: mailcraft_sync::Away,
     /// Optional AI: provider, model, server address (the key is in the OS vault).
     pub ai: mailcraft_ai::Choice,

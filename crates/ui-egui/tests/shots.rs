@@ -203,11 +203,17 @@ fn shots() {
 
         h.get_by_label("Accueil").click();
         h.run();
-        if let Some(n) = h.query_by_label("Nouveau courrier") {
-            n.click();
-        } else {
-            h.get_by_label("Nouveau\ncourrier").click();
-        }
+        h.get_by_label("Alex Dupont — Réunion de jeudi").click();
+        h.run();
+        h.get_by_label("Répondre").click();
+        h.run();
+        h.get_by_label("message").focus();
+        h.run();
+        h.get_by_label("message")
+            .type_text("Bonjour Alex, je t'envoie la facturre de novembre en pièce jointe.");
+        // Dictionaries load in the background.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        h.run();
         save(&mut h, &format!("3-redaction-{theme}"));
 
         let dir = tempfile::tempdir().unwrap();

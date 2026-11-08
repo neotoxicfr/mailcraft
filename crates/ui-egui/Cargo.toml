@@ -25,6 +25,7 @@ mailcraft-html = { workspace = true }
 base64 = { workspace = true }
 rfd = { workspace = true }
 open = { workspace = true }
+spellbook = { workspace = true }
 egui_extras = { workspace = true }
 image = { workspace = true }
 

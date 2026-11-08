@@ -46,6 +46,8 @@ pub struct Composer {
     pub changed_at: Option<Instant>,
     link: Option<String>,
     pub confirm_close: bool,
+    /// Unknown words of the text (byte ranges), for the text they were computed on.
+    spell: Option<(u64, Vec<std::ops::Range<usize>>)>,
 }
 
 /// What the composer asks the app to do.
@@ -56,6 +58,8 @@ pub enum Action {
     Detach,
     /// Close; `Some(true)` keeps the draft, `Some(false)` discards it, `None` asks first.
     Close(Option<bool>),
+    /// Add a word to the user's dictionary.
+    LearnWord(String),
 }
 
 const COLORS: [(u8, u8, u8); 8] = [
@@ -94,6 +98,7 @@ impl Composer {
             changed_at: None,
             link: None,
             confirm_close: false,
+            spell: None,
         }
     }
 
@@ -277,7 +282,9 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
 
     format_bar(ui, c, comp);
     ui.separator();
-    editor(ui, c, comp);
+    if let Some(a) = editor(ui, c, comp) {
+        action = Some(a);
+    }
 
     if !comp.quoted.is_empty() {
         ui.add_space(8.0);
@@ -464,15 +471,40 @@ pub fn clean_link(url: &str) -> Option<String> {
     }
 }
 
-fn editor(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+fn editor(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
+    let mut action = None;
     let typing = comp.typing_style();
     let old = comp.doc.text.clone();
     let text_color = ui.visuals().text_color();
     let accent = c.accent;
+    // Unknown words, computed again only when the text changed.
+    let hash = text_hash(&comp.doc.text);
+    if comp.spell.as_ref().is_none_or(|(h, _)| *h != hash) {
+        let own: std::collections::HashSet<String> =
+            c.own_words.iter().map(|w| w.to_lowercase()).collect();
+        let bad = crate::spell::misspelled(&comp.doc.text, &own);
+        // Dictionaries still loading: try again next frame.
+        if crate::spell::ready() {
+            comp.spell = Some((hash, bad));
+        }
+    }
+    let spell = comp.spell.clone();
     let Doc { text, styles } = &mut comp.doc;
     let styles_now: &Vec<Style> = styles;
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
         let mut job = layout_job(buf.as_str(), styles_now, text_color, accent);
+        if let Some((h, bad)) = &spell
+            && *h == text_hash(buf.as_str())
+        {
+            underline(&mut job, bad);
+        }
         job.wrap.max_width = wrap;
         ui.ctx().fonts_mut(|f| f.layout_job(job))
     };
@@ -499,6 +531,78 @@ fn editor(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) {
         comp.last_cursor = Some(sel);
         comp.selection = sel;
     }
+    // Right-click on an underlined word (caret in it): corrections, or learn the word.
+    let caret = comp
+        .doc
+        .text
+        .char_indices()
+        .nth(comp.selection.0)
+        .map_or(comp.doc.text.len(), |(b, _)| b);
+    let word = crate::spell::word_at(&comp.doc.text, caret).filter(|w| {
+        comp.spell
+            .as_ref()
+            .is_some_and(|(_, bad)| bad.iter().any(|b| b.start <= w.start && w.end <= b.end))
+    });
+    if let Some(range) = word {
+        let lang = c.lang;
+        let shown = comp.doc.text[range.clone()].to_owned();
+        out.response.context_menu(|ui| {
+            let fixes = crate::spell::suggestions(&shown);
+            if fixes.is_empty() {
+                ui.label(egui::RichText::new(T::SpellNoSuggestion.get(lang)).weak());
+            }
+            for fix in fixes {
+                if ui.button(&fix).clicked() {
+                    let before = comp.doc.text.clone();
+                    comp.doc.text.replace_range(range.clone(), &fix);
+                    comp.doc.sync_after_edit(&before, &typing);
+                    comp.touch();
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button(T::SpellLearn.get(lang)).clicked() {
+                action = Some(Action::LearnWord(shown.clone()));
+                comp.spell = None;
+                ui.close();
+            }
+        });
+    }
+    action
+}
+
+/// Red underline under the unknown words (byte ranges), splitting the styled runs as needed.
+fn underline(job: &mut LayoutJob, bad: &[std::ops::Range<usize>]) {
+    if bad.is_empty() {
+        return;
+    }
+    let red = Stroke::new(1.5, Color32::from_rgb(0xD1, 0x34, 0x38));
+    let mut sections = Vec::with_capacity(job.sections.len() + bad.len() * 2);
+    for s in std::mem::take(&mut job.sections) {
+        let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
+        let mut cuts = vec![start, end];
+        for b in bad {
+            for x in [b.start, b.end] {
+                if start < x && x < end {
+                    cuts.push(x);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for (i, w) in cuts.windows(2).enumerate() {
+            let mut part = s.clone();
+            part.byte_range = egui::text::ByteIndex(w[0])..egui::text::ByteIndex(w[1]);
+            if i > 0 {
+                part.leading_space = 0.0;
+            }
+            if bad.iter().any(|b| b.start <= w[0] && w[1] <= b.end) {
+                part.format.underline = red;
+            }
+            sections.push(part);
+        }
+    }
+    job.sections = sections;
 }
 
 fn layout_job(text: &str, styles: &[Style], color: Color32, accent: Color32) -> LayoutJob {

@@ -25,6 +25,8 @@ imap = { version = "=3.0.0-alpha.15", default-features = false }
 imap-proto = "0.16"
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "hostname", "rustls", "ring", "rustls-platform-verifier"] }
 mail-parser = "1.0.1"
+# Spell checking (Hunspell dictionaries), pure Rust
+spellbook = "0.4.2"
 rustls-platform-verifier = "0.7"
 
 # reading: HTML parsing, original view (Edge WebView2), attachments

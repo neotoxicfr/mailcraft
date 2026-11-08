@@ -269,6 +269,8 @@ pub struct Ctx<'a> {
     pub screener: bool,
     /// The list groups messages by conversation.
     pub conversations: bool,
+    /// Words the user added to the spell checker.
+    pub own_words: &'a [String],
     /// Address completion: (account, typed text) → (name, address).
     pub suggest: Option<&'a Suggest<'a>>,
 }

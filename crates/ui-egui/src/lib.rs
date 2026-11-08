@@ -15,6 +15,7 @@ mod print;
 mod reader;
 pub mod settings;
 pub mod shell;
+mod spell;
 mod startup;
 pub mod theme;
 
@@ -203,6 +204,7 @@ impl MailCraftApp {
     /// Settings only, no mail backend (tests, or when the backend cannot start).
     pub fn with_location(ctx: &Context, location: Location) -> Self {
         fonts::install(ctx);
+        spell::warm_up();
         let (settings, report) = SettingsStore::open(location);
         if report.has_problems() {
             log::warn!("settings: {report:?}");
@@ -256,6 +258,7 @@ impl MailCraftApp {
                 block_images: prefs.privacy.block_remote_images,
                 screener: prefs.cleanup.screener,
                 conversations: prefs.appearance.conversations,
+                own_words: &prefs.spell_words,
                 suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
             };
             shell::show(ui, &c, &mut self.view, &mut next)
@@ -1064,6 +1067,14 @@ impl MailCraftApp {
                 }
             }
             composer::Action::Detach => self.view.composers[pos].detached = true,
+            composer::Action::LearnWord(word) => {
+                let word = word.trim().to_owned();
+                self.settings.update(|p| {
+                    if !p.spell_words.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
+                        p.spell_words.push(word);
+                    }
+                });
+            }
             composer::Action::Close(choice) => {
                 let k = &self.view.composers[pos];
                 match choice {
@@ -1128,6 +1139,7 @@ impl MailCraftApp {
                         block_images: prefs.privacy.block_remote_images,
                         screener: prefs.cleanup.screener,
                         conversations: prefs.appearance.conversations,
+                        own_words: &prefs.spell_words,
                         suggest: suggest.map(|f| f as &shell::Suggest<'_>),
                     };
                     egui::CentralPanel::default().show(ui, |ui| {
