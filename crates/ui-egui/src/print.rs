@@ -18,7 +18,7 @@ pub fn page(
     body: &MessageBody,
     date: &str,
     lang: Lang,
-    block_images: bool,
+    (block_images, block_trackers): (bool, bool),
 ) -> String {
     let images = if block_images {
         "data:"
@@ -53,7 +53,11 @@ pub fn page(
             escape(&body.text)
         )
     } else {
-        body.html.clone()
+        if block_trackers && !block_images {
+            mailcraft_html::without_trackers(&body.html)
+        } else {
+            body.html.clone()
+        }
     };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
@@ -130,7 +134,7 @@ mod tests {
             html: "<p>Bonjour</p><script>alert(1)</script>".into(),
             ..MessageBody::default()
         };
-        let html = page(&m("Facture"), &body, "08/11/2026", Lang::Fr, true);
+        let html = page(&m("Facture"), &body, "08/11/2026", Lang::Fr, (true, true));
         assert!(html.contains("script-src 'nonce-mailcraftprint'"));
         assert!(html.contains("img-src data:;"));
         assert!(html.contains("Shop &lt;b&gt;"));

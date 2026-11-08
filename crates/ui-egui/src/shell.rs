@@ -537,6 +537,11 @@ fn dialog(
                             T::EncryptLocalCopy.get(lang),
                         );
                         ui.checkbox(
+                            &mut prefs.privacy.block_trackers,
+                            T::BlockTrackers.get(lang),
+                        );
+                        ui.label(RichText::new(T::BlockTrackersHelp.get(lang)).small().weak());
+                        ui.checkbox(
                             &mut prefs.privacy.block_remote_images,
                             T::BlockRemoteImages.get(lang),
                         );

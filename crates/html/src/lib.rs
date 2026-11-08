@@ -60,6 +60,7 @@ struct Style {
 }
 
 struct Walker {
+    drop_trackers: bool,
     blocks: Vec<Block>,
     current: Vec<Inline>,
     kind: Kind,
@@ -70,8 +71,15 @@ struct Walker {
 }
 
 pub fn parse(html: &str) -> Vec<Block> {
+    parse_with(html, true)
+}
+
+/// Like [`parse`]; `drop_trackers` false keeps tracking pixels (they are then fetched, so the
+/// sender knows the mail was opened).
+pub fn parse_with(html: &str, drop_trackers: bool) -> Vec<Block> {
     let doc = Html::parse_document(html);
     let mut w = Walker {
+        drop_trackers,
         blocks: Vec::new(),
         current: Vec::new(),
         kind: Kind::Para,
@@ -178,6 +186,80 @@ fn background_image(el: &ElementRef<'_>) -> Option<String> {
 }
 
 /// A 1×1 (or 0×0) image is a tracking pixel, not content.
+/// Known open-tracking addresses (mailing services, sales tools). Matched on the lowercased URL.
+const TRACKER_MARKS: [&str; 16] = [
+    "/track/open",
+    "/wf/open",
+    "/open.php",
+    "/open.aspx",
+    "/tracking/open",
+    "/trk/open",
+    "/e/o/",
+    "/openpixel",
+    "/pixel.gif",
+    "/pixel.png",
+    "/beacon",
+    "mailtrack.io",
+    "t.yesware.com",
+    "mixmax.com/api/track",
+    "/emimp/",
+    "/imp?",
+];
+
+/// An image whose only purpose is to tell the sender the mail was opened: 1 px wide or high,
+/// hidden by its style, or served by a known open-tracking address.
+fn is_tracker(el: &ElementRef<'_>) -> bool {
+    let src = el.value().attr("src").unwrap_or("").to_ascii_lowercase();
+    let styled_hidden = el.value().attr("style").is_some_and(|s| {
+        let s: String = s
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        s.contains("display:none")
+            || s.contains("visibility:hidden")
+            || s.contains("opacity:0;")
+            || s.ends_with("opacity:0")
+            || ["width:0", "width:1px", "height:0", "height:1px"]
+                .iter()
+                .any(|w| s.split(';').any(|d| d == *w))
+    });
+    tracking_pixel(el) || styled_hidden || TRACKER_MARKS.iter().any(|m| src.contains(m))
+}
+
+/// Addresses of the tracking pixels of a message, as written in its HTML.
+pub fn tracker_urls(html: &str) -> Vec<String> {
+    let doc = Html::parse_document(html);
+    let img = scraper::Selector::parse("img").expect("selector");
+    let mut out: Vec<String> = doc
+        .select(&img)
+        .filter(is_tracker)
+        .filter_map(|el| el.value().attr("src").map(str::to_owned))
+        .filter(|s| {
+            let l = s.to_ascii_lowercase();
+            l.starts_with("http://") || l.starts_with("https://") || l.starts_with("//")
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The HTML with its tracking pixels pointing nowhere (`src=""`), for the original view and
+/// printing. Both spellings of `&` in the address are handled.
+pub fn without_trackers(html: &str) -> String {
+    let mut out = html.to_owned();
+    for url in tracker_urls(html) {
+        let escaped = url.replace('&', "&amp;");
+        for form in [url.as_str(), escaped.as_str()] {
+            if !form.is_empty() {
+                out = out.replace(form, "");
+            }
+        }
+    }
+    out
+}
+
 fn tracking_pixel(el: &ElementRef<'_>) -> bool {
     let tiny = |a: &str| {
         el.value().attr(a).is_some_and(|v| {
@@ -348,7 +430,7 @@ impl Walker {
                 if (lower.starts_with("https://")
                     || lower.starts_with("http://")
                     || lower.starts_with("cid:"))
-                    && !tracking_pixel(&el)
+                    && !(self.drop_trackers && is_tracker(&el))
                 {
                     let alt = el.value().attr("alt").unwrap_or("").trim().to_owned();
                     self.push_block(Kind::Image {

@@ -408,13 +408,17 @@ fn welcome_assistant_steps_and_options_view() {
     h.get_by_label("Suivant").click();
     h.run();
     h.get_by_label("Vie privée");
-    h.get_by_label("Bloquer les images distantes et les pixels espions")
+    h.get_by_label("Bloquer toutes les images distantes")
         .click();
     h.run();
     h.get_by_label("Passer").click();
     h.run();
     let prefs = h.state().as_ref().unwrap().prefs().clone();
     assert!(prefs.general.onboarded && prefs.privacy.block_remote_images);
+    assert!(
+        prefs.privacy.block_trackers,
+        "tracking pixels blocked by default"
+    );
     assert!(h.query_by_label("Vie privée").is_none());
 
     // File › Options shows every setting; simulation is on by default.

@@ -236,6 +236,8 @@ pub enum T {
     RebuildScheduled,
     BlockRemoteImages,
     BlockRemoteImagesHelp,
+    BlockTrackers,
+    BlockTrackersHelp,
     Screener,
     ScreenerHelp,
     StartupSection,
@@ -666,12 +668,17 @@ impl T {
                 "Rebuild scheduled: restart MailCraft",
             ),
             Self::BlockRemoteImages => (
-                "Bloquer les images distantes et les pixels espions",
-                "Block remote images and tracking pixels",
+                "Bloquer toutes les images distantes",
+                "Block all remote images",
             ),
             Self::BlockRemoteImagesHelp => (
-                "L'expéditeur ne sait pas quand vous ouvrez son mail. Les images jointes au mail restent affichées.",
-                "Senders cannot tell when you open their mail. Images attached to the mail still show.",
+                "Aucune image n'est chargée depuis Internet (logos, photos des newsletters). Plus discret, mais les mails sont moins jolis. Les images jointes au mail restent affichées.",
+                "No image is loaded from the internet (logos, newsletter pictures). More discreet, but mail looks plainer. Images attached to the mail still show.",
+            ),
+            Self::BlockTrackers => ("Bloquer les pixels espions", "Block tracking pixels"),
+            Self::BlockTrackersHelp => (
+                "Les images invisibles qui préviennent l'expéditeur que vous avez ouvert son mail ne sont jamais chargées. Les autres images s'affichent normalement.",
+                "The invisible images that tell senders you opened their mail are never loaded. Other images show as usual.",
             ),
             Self::Screener => ("Sas des nouveaux expéditeurs", "Screen new senders"),
             Self::ScreenerHelp => (

@@ -1,4 +1,4 @@
-use super::{Block, Kind, from_text, parse, to_text};
+use super::{Block, Kind, from_text, parse, parse_with, to_text, tracker_urls, without_trackers};
 
 fn texts(blocks: &[Block]) -> Vec<String> {
     blocks
@@ -142,4 +142,32 @@ fn background_images_become_images() {
             "https://cdn.example.com/b.jpg"
         ]
     );
+}
+
+#[test]
+fn tracking_pixels_are_recognised() {
+    let html = r#"<p>Bonjour</p>
+<img src="https://cdn.shop.example/banner.jpg" width="600" alt="Soldes">
+<img src="https://t.shop.example/o?id=1&amp;u=2" width="1" height="1">
+<img src="https://u123.ct.sendgrid.net/wf/open?upn=abc">
+<img src="https://x.example/p.gif" style="display: none">
+<img src="https://x.example/q.gif" style="width:1px;height:1px">"#;
+    let urls = tracker_urls(html);
+    assert_eq!(urls.len(), 4, "{urls:?}");
+    assert!(!urls.iter().any(|u| u.contains("banner")));
+    let clean = without_trackers(html);
+    assert!(clean.contains("banner.jpg"));
+    assert!(
+        !clean.contains("t.shop.example")
+            && !clean.contains("sendgrid")
+            && !clean.contains("p.gif")
+    );
+    // Simplified view: dropped by default, kept on demand.
+    let images = |b: &[Block]| {
+        b.iter()
+            .filter(|b| matches!(b.kind, Kind::Image { .. }))
+            .count()
+    };
+    assert_eq!(images(&parse(html)), 1);
+    assert_eq!(images(&parse_with(html, false)), 4); // only the display:none one stays out
 }

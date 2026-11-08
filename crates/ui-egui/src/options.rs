@@ -95,6 +95,11 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, prefs: &mut Prefs, view: &mut View) -> Opt
                 });
             }
             ui.checkbox(
+                &mut prefs.privacy.block_trackers,
+                T::BlockTrackers.get(lang),
+            )
+            .on_hover_text(T::BlockTrackersHelp.get(lang));
+            ui.checkbox(
                 &mut prefs.privacy.block_remote_images,
                 T::BlockRemoteImages.get(lang),
             )

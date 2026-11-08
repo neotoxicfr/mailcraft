@@ -66,6 +66,9 @@ pub struct Mail {
     /// The message's HTML prepared for the original view (inline images embedded, CSP added).
     pub original_html: String,
     body_key: Option<(i64, String)>,
+    /// Image blocking applied to the shown message: (remote images, tracking pixels).
+    pub blocking: (bool, bool),
+    blocking_applied: (bool, bool),
     /// Remote images: asked for, loaded (bytes given to egui), or failed.
     pub images_requested: HashSet<String>,
     pub images_ready: HashSet<String>,
@@ -186,8 +189,9 @@ impl Mail {
         };
         // Parse once per message (or when its body arrives), not every frame.
         let key = self.message.clone().filter(|_| self.body.is_some());
-        if key != self.body_key {
+        if key != self.body_key || self.blocking != self.blocking_applied {
             self.body_key = key;
+            self.blocking_applied = self.blocking;
             self.inline.clear();
             self.inline_requested = false;
             match (&self.message, &self.body) {
@@ -195,10 +199,10 @@ impl Mail {
                     self.blocks = if b.html.is_empty() {
                         mailcraft_html::from_text(&b.text)
                     } else {
-                        mailcraft_html::parse(&b.html)
+                        mailcraft_html::parse_with(&b.html, self.blocking.1)
                     };
                     self.attachments = store.attachments(*a, id)?;
-                    self.original_html = original_html(&b.html, &self.inline);
+                    self.original_html = original_html(&b.html, &self.inline, self.blocking);
                 }
                 _ => {
                     self.blocks.clear();
@@ -214,7 +218,7 @@ impl Mail {
     pub fn set_inline(&mut self, images: Vec<(String, Vec<u8>)>) {
         self.inline = images.into_iter().collect();
         if let Some(b) = &self.body {
-            self.original_html = original_html(&b.html, &self.inline);
+            self.original_html = original_html(&b.html, &self.inline, self.blocking);
         }
     }
 
@@ -307,15 +311,34 @@ fn tree<'a>(
 
 /// The original HTML for the WebView: `cid:` images replaced by their bytes, scripts and
 /// plug-ins forbidden by a Content-Security-Policy (JavaScript is also off in the view).
-pub fn original_html(html: &str, inline: &HashMap<String, Vec<u8>>) -> String {
+/// The message's HTML for the original view: scripts, frames and forms off; tracking pixels
+/// removed and remote images refused as `blocking` (remote, trackers) says; inline images
+/// embedded.
+pub fn original_html(
+    html: &str,
+    inline: &HashMap<String, Vec<u8>>,
+    (remote, trackers): (bool, bool),
+) -> String {
     if html.is_empty() {
         return String::new();
     }
+    let cleaned;
+    let html = if trackers && !remote {
+        cleaned = mailcraft_html::without_trackers(html);
+        cleaned.as_str()
+    } else {
+        html
+    };
     let mut out = String::with_capacity(html.len() + 256);
     out.push_str(
         "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; object-src 'none'; \
-         frame-src 'none'; form-action 'none'; base-uri 'none'\">",
+         frame-src 'none'; form-action 'none'; base-uri 'none'",
     );
+    // Remote images refused: only the embedded (inline) ones load, CSS backgrounds included.
+    if remote {
+        out.push_str("; img-src data:");
+    }
+    out.push_str("\">");
     let mut rest = html;
     while let Some(at) = rest.find("cid:") {
         out.push_str(&rest[..at]);
@@ -375,12 +398,24 @@ mod tests {
     #[test]
     fn cid_images_are_embedded_and_scripts_forbidden() {
         let inline = HashMap::from([("logo@x".to_string(), vec![0x89, b'P', b'N', b'G', 1])]);
-        let out = original_html("<img src=\"cid:logo@x\"><img src='cid:missing'>", &inline);
+        let out = original_html(
+            "<img src=\"cid:logo@x\"><img src='cid:missing'>",
+            &inline,
+            (false, true),
+        );
         assert!(out.starts_with(
             "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'"
         ));
         assert!(out.contains("src=\"data:image/png;base64,iVBORwE=\""));
         assert!(out.contains("src='cid:missing'"));
-        assert!(original_html("", &inline).is_empty());
+        assert!(original_html("", &inline, (false, true)).is_empty());
+        // Remote images refused through the page's policy; pixels removed when only they are.
+        let page =
+            "<img src=\"https://x.example/a.jpg\"><img src=\"https://x.example/t\" width=\"1\">";
+        assert!(original_html(page, &inline, (true, true)).contains("img-src data:"));
+        let only_pixels = original_html(page, &inline, (false, true));
+        assert!(!only_pixels.contains("img-src") && only_pixels.contains("a.jpg"));
+        assert!(!only_pixels.contains("x.example/t"));
+        assert!(original_html(page, &inline, (false, false)).contains("x.example/t"));
     }
 }

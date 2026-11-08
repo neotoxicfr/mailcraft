@@ -95,6 +95,10 @@ impl MailCraftApp {
             .cleanup
             .screener
             .then_some(prefs.cleanup.screener_since);
+        self.mail.blocking = (
+            prefs.privacy.block_remote_images,
+            prefs.privacy.block_trackers,
+        );
         if let Some(b) = &self.backend
             && let Err(e) = self.mail.reload(
                 &b.store,
@@ -170,7 +174,16 @@ impl MailCraftApp {
                     .to_string()
             })
             .unwrap_or_default();
-        let html = print::page(&m, &body, &date, lang, prefs.privacy.block_remote_images);
+        let html = print::page(
+            &m,
+            &body,
+            &date,
+            lang,
+            (
+                prefs.privacy.block_remote_images,
+                prefs.privacy.block_trackers,
+            ),
+        );
         let Some(dir) = craft_settings::paths::data_dir("mailcraft") else {
             return;
         };
