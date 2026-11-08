@@ -40,11 +40,18 @@
           </Shortcut>
         </File>
       </Component>
-      <Component Id="Licenses">
+      <!-- One component per unversioned file: only then can WiX generate their GUIDs. -->
+      <Component Id="LicenseMit">
         <File Id="LicenseMit" Source="$(var.Root)\LICENSE-MIT" KeyPath="yes" />
-        <File Id="LicenseApache" Source="$(var.Root)\LICENSE-APACHE" />
-        <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" />
-        <File Id="Attribution" Source="$(var.Root)\ATTRIBUTION.md" />
+      </Component>
+      <Component Id="LicenseApache">
+        <File Id="LicenseApache" Source="$(var.Root)\LICENSE-APACHE" KeyPath="yes" />
+      </Component>
+      <Component Id="Notice">
+        <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="Attribution">
+        <File Id="Attribution" Source="$(var.Root)\ATTRIBUTION.md" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
