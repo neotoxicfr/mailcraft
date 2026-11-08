@@ -1,0 +1,19 @@
+MailCraft
+Copyright (c) 2026 the MailCraft contributors.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+Third-party material
+
+This product bundles third-party material under its own licenses, listed below. The per-file
+list (author, source, license) is in ATTRIBUTION.md.
+
+- Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
+- egui default fonts, embedded by the egui dependency as fallbacks — see that crate's licenses.
+
+Original work
+
+- Application-drawn UI icons (crates/ui-egui/src/icons.rs) are original work, MIT OR Apache-2.0.
+
+Rust dependencies (egui, eframe, craft-settings, serde, winreg, …) are used under their own
+licenses (MIT and/or Apache-2.0); see each crate.

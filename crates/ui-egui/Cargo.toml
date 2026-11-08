@@ -1,0 +1,24 @@
+[package]
+name = "mailcraft-ui-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "MailCraft user interface (egui)"
+
+[lints]
+workspace = true
+
+[dependencies]
+egui = { workspace = true, features = ["default_fonts"] }
+serde = { workspace = true }
+craft-settings = { workspace = true }
+log = { workspace = true }
+sys-locale = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# Reads the Windows accent colour (safe API; the workspace forbids unsafe).
+winreg = "0.55"
+
+[dev-dependencies]
+egui_kittest = { workspace = true }

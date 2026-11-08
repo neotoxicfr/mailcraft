@@ -1,0 +1,28 @@
+# build output, test copies, captures
+/target
+/target-*/
+/dist
+
+# never commit secrets or personal data
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+token*.json
+*.db
+*.sqlite
+*.sqlite3
+*.eml
+!tests/**/*.eml
+config.toml.broken*
+/config/
+/log
+
+# local tools
+/.claude/
+/.vscode/
+/.idea/
+*~
+.DS_Store

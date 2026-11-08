@@ -1,0 +1,15 @@
+[package]
+name = "mailcraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "MailCraft desktop app"
+
+[lints]
+workspace = true
+
+[dependencies]
+mailcraft-ui-egui = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
+log = { workspace = true }
