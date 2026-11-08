@@ -25,7 +25,10 @@ use serde::{Deserialize, Serialize};
 
 pub const PROVIDER_MICROSOFT: &str = "microsoft";
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
-const SYNC_EVERY: Duration = Duration::from_secs(120);
+/// Full sync of every folder of every account.
+const SYNC_EVERY: Duration = Duration::from_secs(600);
+/// Inboxes that the server does not push (Microsoft, IMAP without IDLE): checked this often.
+const QUICK_EVERY: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -40,6 +43,12 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     AddMicrosoftAccount,
+    /// Inboxes only, for new mail within seconds (the worker sends it to itself).
+    QuickSync,
+    /// The IDLE watch of this IMAP account stopped for good: its inbox is polled instead.
+    IdleStopped {
+        account_id: i64,
+    },
     /// The server said the inbox of this IMAP account changed (IDLE): sync it now.
     SyncInbox {
         account_id: i64,
@@ -307,7 +316,7 @@ impl Worker {
                     wake();
                 };
                 match Runner::new(config, flag, side, again) {
-                    Ok(mut runner) => runner.run(&requests, &emit),
+                    Ok(mut runner) => runner.run(requests, &emit),
                     Err(e) => emit(Event::Error(e)),
                 }
             })
@@ -362,8 +371,19 @@ struct Runner {
     again: Sender<Request>,
     /// IMAP accounts whose inbox is watched with IDLE.
     watched: HashSet<i64>,
+    /// IMAP accounts whose server refused IDLE: their inbox is polled.
+    idle_off: HashSet<i64>,
     rules: Vec<Rule>,
     away: Option<Away>,
+    /// The request queue, kept here so a long sync can serve what the user waits for.
+    requests: Option<Receiver<Request>>,
+    /// Requests that arrived during a sync and can wait for its end.
+    deferred: std::collections::VecDeque<Request>,
+    /// A sync is running: changes are queued, sent at its end.
+    in_sync: bool,
+    serving: bool,
+    /// IMAP folder state from the last folder list ((account, folder) → signature).
+    folder_states: HashMap<(i64, String), String>,
 }
 
 impl Runner {
@@ -393,27 +413,112 @@ impl Runner {
             raw: None,
             again,
             watched: HashSet::new(),
+            idle_off: HashSet::new(),
             rules: Vec::new(),
             away: None,
+            requests: None,
+            deferred: std::collections::VecDeque::new(),
+            in_sync: false,
+            serving: false,
+            folder_states: HashMap::new(),
         })
     }
 
-    fn run(&mut self, requests: &Receiver<Request>, emit: &dyn Fn(Event)) {
+    fn run(&mut self, requests: Receiver<Request>, emit: &dyn Fn(Event)) {
+        self.requests = Some(requests);
         let mut next_sync = Instant::now();
+        let mut next_quick = Instant::now() + QUICK_EVERY;
         loop {
-            let wait = next_sync.saturating_duration_since(Instant::now());
-            let request = match requests.recv_timeout(wait) {
-                Ok(r) => r,
-                Err(RecvTimeoutError::Timeout) => Request::SyncAll,
-                Err(RecvTimeoutError::Disconnected) => return,
+            let request = match self.deferred.pop_front() {
+                Some(r) => r,
+                None => {
+                    let due = next_sync.min(next_quick);
+                    let wait = due.saturating_duration_since(Instant::now());
+                    let Some(rx) = self.requests.as_ref() else {
+                        return;
+                    };
+                    match rx.recv_timeout(wait) {
+                        Ok(r) => r,
+                        Err(RecvTimeoutError::Timeout) if next_sync <= next_quick => {
+                            Request::SyncAll
+                        }
+                        Err(RecvTimeoutError::Timeout) => Request::QuickSync,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
             };
-            if request == Request::SyncAll {
-                next_sync = Instant::now() + SYNC_EVERY;
+            match request {
+                Request::SyncAll => {
+                    next_sync = Instant::now() + SYNC_EVERY;
+                    next_quick = Instant::now() + QUICK_EVERY;
+                }
+                Request::QuickSync => next_quick = Instant::now() + QUICK_EVERY,
+                _ => {}
             }
             if let Err(e) = self.handle(request, emit) {
                 emit(Event::Error(e));
             }
         }
+    }
+
+    /// What the user is waiting for: opening a message, its images and attachments, read and
+    /// flag marks, moves, sending. Served even in the middle of a sync.
+    fn urgent(request: &Request) -> bool {
+        matches!(
+            request,
+            Request::FetchBody { .. }
+                | Request::FetchInline { .. }
+                | Request::FetchImage { .. }
+                | Request::SaveAttachment { .. }
+                | Request::SetRead { .. }
+                | Request::SetFlag { .. }
+                | Request::Move { .. }
+                | Request::Delete { .. }
+                | Request::SaveDraft { .. }
+                | Request::Send { .. }
+                | Request::DiscardDraft { .. }
+                | Request::Export { .. }
+        )
+    }
+
+    /// Called between folders and pages of a sync: handles the urgent requests waiting, keeps
+    /// the others for after the sync.
+    pub(crate) fn serve_urgent(&mut self, emit: &dyn Fn(Event)) {
+        if self.serving {
+            return;
+        }
+        self.serving = true;
+        let waiting: Vec<Request> = self
+            .requests
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for request in waiting {
+            if Self::urgent(&request) {
+                if let Err(e) = self.handle(request, emit) {
+                    emit(Event::Error(e));
+                }
+            } else {
+                self.deferred.push_back(request);
+            }
+        }
+        self.serving = false;
+    }
+
+    /// Runs a sync with urgent requests served along the way; queued changes go at its end.
+    fn syncing(
+        &mut self,
+        emit: &dyn Fn(Event),
+        work: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let was = self.in_sync;
+        self.in_sync = true;
+        let result = work(self);
+        self.in_sync = was;
+        if !was && self.store.pending().is_ok_and(|p| !p.is_empty()) {
+            self.flush_pending(emit)?;
+        }
+        result
     }
 
     fn handle(&mut self, request: Request, emit: &dyn Fn(Event)) -> Result<(), String> {
@@ -450,18 +555,43 @@ impl Runner {
                 Ok(())
             }
             Request::SyncInbox { account_id } => {
-                self.imap_sync_inbox(account_id, emit)?;
-                self.run_automation(account_id, emit)?;
+                self.syncing(emit, |r| {
+                    r.imap_sync_inbox(account_id, emit)?;
+                    r.run_automation(account_id, emit)
+                })?;
+                emit(Event::SyncDone);
+                Ok(())
+            }
+            Request::IdleStopped { account_id } => {
+                self.watched.remove(&account_id);
+                self.idle_off.insert(account_id);
+                Ok(())
+            }
+            Request::QuickSync => {
+                self.syncing(emit, |r| {
+                    for account in r.store.accounts().map_err(|e| e.to_string())? {
+                        r.quick_sync(account.id, emit)?;
+                        r.run_automation(account.id, emit)?;
+                        r.serve_urgent(emit);
+                    }
+                    Ok(())
+                })?;
                 emit(Event::SyncDone);
                 Ok(())
             }
             Request::AddMicrosoftAccount => self.add_account(emit),
             Request::SyncAll => {
                 self.flush_pending(emit)?;
-                for account in self.store.accounts().map_err(|e| e.to_string())? {
-                    self.sync_account(account.id, emit)?;
-                    self.run_automation(account.id, emit)?;
-                }
+                self.syncing(emit, |r| {
+                    for account in r.store.accounts().map_err(|e| e.to_string())? {
+                        let t = Instant::now();
+                        r.sync_account(account.id, emit)?;
+                        log::debug!("sync: account {} in {:?}", account.id, t.elapsed());
+                        r.run_automation(account.id, emit)?;
+                        r.serve_urgent(emit);
+                    }
+                    Ok(())
+                })?;
                 emit(Event::SyncDone);
                 Ok(())
             }
@@ -755,6 +885,10 @@ impl Runner {
                 .map_err(|e| e.to_string())?;
         }
         emit(Event::Changed);
+        // During a sync the changes go at its end (in one go, without a sync inside a sync).
+        if self.in_sync {
+            return Ok(());
+        }
         self.flush_pending(emit)
     }
 
@@ -1021,6 +1155,7 @@ impl Runner {
                 if let Some(id) = self.with_graph(account_id, |g| g.well_known_id(role))? {
                     roles.insert(id, role.to_owned());
                 }
+                self.serve_urgent(emit);
             }
             self.roles.insert(account_id, roles);
         }
@@ -1045,11 +1180,33 @@ impl Runner {
         Ok(folders)
     }
 
+    /// The inbox only: Microsoft (one delta request when nothing changed) and IMAP accounts
+    /// whose server does not push. IMAP inboxes watched with IDLE need nothing.
+    fn quick_sync(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
+        if self.is_imap(account_id) {
+            if self.watched.contains(&account_id) && !self.idle_off.contains(&account_id) {
+                return Ok(());
+            }
+            return self.imap_sync_inbox(account_id, emit);
+        }
+        let inbox = self
+            .store
+            .folders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|f| f.role.as_deref() == Some("inbox"));
+        match inbox {
+            Some(f) => self.sync_folder(account_id, &f, emit),
+            None => Ok(()),
+        }
+    }
+
     fn sync_account(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
         if self.is_imap(account_id) {
             return self.imap_sync_account(account_id, emit);
         }
         let folders = self.refresh_folders(account_id, emit)?;
+        self.serve_urgent(emit);
         self.sync_folders(account_id, &folders, emit)?;
         if self.contacts_done.insert(account_id) {
             self.sync_contacts(account_id);
@@ -1565,8 +1722,14 @@ impl Runner {
                 .and_then(|r| ROLES.iter().position(|x| *x == r))
                 .unwrap_or(ROLES.len())
         });
-        for folder in order {
+        for (i, folder) in order.into_iter().enumerate() {
+            let t = Instant::now();
             self.sync_folder(account_id, folder, emit)?;
+            log::debug!(
+                "sync: account {account_id} folder #{i} in {:?}",
+                t.elapsed()
+            );
+            self.serve_urgent(emit);
         }
         Ok(())
     }
@@ -1616,7 +1779,10 @@ impl Runner {
                 emit(Event::Changed);
             }
             match (page.next, page.delta_link) {
-                (Some(next), _) => url = next,
+                (Some(next), _) => {
+                    url = next;
+                    self.serve_urgent(emit);
+                }
                 (None, link) => {
                     self.store
                         .set_delta_link(account_id, &folder.id, link.as_deref())

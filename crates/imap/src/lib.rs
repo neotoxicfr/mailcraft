@@ -151,6 +151,9 @@ pub struct RemoteFolder {
     pub is_view: bool,
     pub unread: i64,
     pub total: i64,
+    /// `uidvalidity:uidnext:messages:highestmodseq` when the server gives them all (CONDSTORE):
+    /// the same value as at the last sync means nothing changed in the folder.
+    pub state: Option<String>,
 }
 
 /// What the list shows for a message.
@@ -323,6 +326,8 @@ fn role_by_name(shown: &str) -> Option<&'static str> {
 pub struct Imap {
     session: imap::Session<Tls>,
     can_move: bool,
+    /// CONDSTORE: STATUS gives a change counter (HIGHESTMODSEQ).
+    condstore: bool,
     selected: Option<String>,
 }
 
@@ -348,13 +353,14 @@ impl Imap {
         } else {
             client.login(user, &s.password).map_err(refused)?
         };
-        let can_move = session
+        let (can_move, condstore) = session
             .capabilities()
-            .map(|c| c.has_str("MOVE"))
-            .unwrap_or(false);
+            .map(|c| (c.has_str("MOVE"), c.has_str("CONDSTORE")))
+            .unwrap_or((false, false));
         Ok(Self {
             session,
             can_move,
+            condstore,
             selected: None,
         })
     }
@@ -445,12 +451,24 @@ impl Imap {
         let mut out = Vec::new();
         for (id, parent, role, is_view) in raw {
             let role = role.filter(|r| taken.insert(*r));
-            let (unread, total) = match self.session.status(&id, "(MESSAGES UNSEEN)") {
-                Ok(m) => (i64::from(m.unseen.unwrap_or(0)), i64::from(m.exists)),
+            let items = if self.condstore {
+                "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
+            } else {
+                "(MESSAGES UNSEEN)"
+            };
+            let (unread, total, state) = match self.session.status(&id, items) {
+                Ok(m) => (
+                    i64::from(m.unseen.unwrap_or(0)),
+                    i64::from(m.exists),
+                    match (m.uid_validity, m.uid_next, m.highest_mod_seq) {
+                        (Some(v), Some(n), Some(q)) => Some(format!("{v}:{n}:{}:{q}", m.exists)),
+                        _ => None,
+                    },
+                ),
                 Err(e @ (imap::Error::Io(_) | imap::Error::ConnectionLost)) => {
                     return Err(e.into());
                 }
-                Err(_) => (0, 0),
+                Err(_) => (0, 0, None),
             };
             let leaf = parent
                 .as_deref()
@@ -468,6 +486,7 @@ impl Imap {
                 is_view,
                 unread,
                 total,
+                state,
             });
         }
         Ok(out)

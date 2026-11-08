@@ -145,6 +145,17 @@ impl Runner {
         let remote = self.with_imap(account_id, Imap::folders)?;
         let mut roles = HashMap::new();
         let mut views = HashSet::new();
+        for f in &remote {
+            match &f.state {
+                Some(s) => {
+                    self.folder_states
+                        .insert((account_id, f.id.clone()), s.clone());
+                }
+                None => {
+                    self.folder_states.remove(&(account_id, f.id.clone()));
+                }
+            }
+        }
         let folders: Vec<Folder> = remote
             .into_iter()
             .map(|f| {
@@ -187,7 +198,8 @@ impl Runner {
             .into_iter()
             .find(|f| f.role.as_deref() == Some("inbox"));
         match inbox {
-            Some(f) => self.imap_sync_folder(account_id, &f, emit),
+            // The server just announced a change: never skipped as unchanged.
+            Some(f) => self.imap_sync_folder(account_id, &f, true, emit),
             None => Ok(()),
         }
     }
@@ -218,6 +230,7 @@ impl Runner {
                         // Wrong password or no IDLE on this server: the 2-minute sync remains.
                         Err(ImapError::Auth(e) | ImapError::Refused(e)) => {
                             log::info!("no instant mail for account {account_id}: {e}");
+                            let _ = again.send(crate::Request::IdleStopped { account_id });
                             return;
                         }
                         Err(e) => {
@@ -247,18 +260,43 @@ impl Runner {
                 .and_then(|r| mailcraft_store::ROLES.iter().position(|x| *x == r))
                 .unwrap_or(mailcraft_store::ROLES.len())
         });
-        for folder in order {
-            self.imap_sync_folder(account_id, folder, emit)?;
+        for (i, folder) in order.into_iter().enumerate() {
+            let t = std::time::Instant::now();
+            self.imap_sync_folder(account_id, folder, false, emit)?;
+            log::debug!(
+                "sync: imap account {account_id} folder #{i} in {:?}",
+                t.elapsed()
+            );
+            self.serve_urgent(emit);
         }
         Ok(())
     }
 
+    /// Syncs one folder. Unless `force`, a folder whose server state (uidvalidity, next uid,
+    /// message count, change counter) is the one seen at its last sync is skipped: nothing in
+    /// it changed, not even a read mark.
     fn imap_sync_folder(
         &mut self,
         account_id: i64,
         folder: &Folder,
+        force: bool,
         emit: &dyn Fn(Event),
     ) -> Result<(), String> {
+        let state = self
+            .folder_states
+            .get(&(account_id, folder.id.clone()))
+            .map(|s| format!("{s}:{}", self.config.months));
+        if !force
+            && let Some(state) = &state
+            && self
+                .store
+                .delta_link(account_id, &folder.id)
+                .map_err(|e| e.to_string())?
+                .as_deref()
+                == Some(state.as_str())
+        {
+            return Ok(());
+        }
         let since = unix_now() - i64::from(self.config.months) * 30 * 24 * 3600;
         let scan = match self.try_imap(account_id, |s| s.scan(&folder.id, since)) {
             Ok(s) => s,
@@ -343,6 +381,7 @@ impl Runner {
                 .filter(|r| blocked.contains(&r.from_addr.to_lowercase()))
                 .map(|r| r.id.clone())
                 .collect();
+            self.serve_urgent(emit);
             if !to_junk.is_empty()
                 && let Some(junk) = self.role_of(account_id, "junkemail")
             {
@@ -356,6 +395,11 @@ impl Runner {
                     .delete_local(account_id, &to_junk)
                     .map_err(|e| e.to_string())?;
             }
+        }
+        if let Some(state) = state {
+            self.store
+                .set_delta_link(account_id, &folder.id, Some(&state))
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
