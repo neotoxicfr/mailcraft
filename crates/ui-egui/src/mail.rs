@@ -36,6 +36,7 @@ pub enum Status {
     Sent,
     AttachmentSaved,
     ServerFound(usize),
+    Exported(usize),
     /// Changes made locally wait for the network.
     Offline {
         pending: usize,

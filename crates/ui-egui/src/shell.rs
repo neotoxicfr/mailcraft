@@ -142,6 +142,10 @@ pub enum Command {
     SaveAway {
         away: Box<mailcraft_sync::Away>,
     },
+    /// The shown message as a page, in the browser's print dialog.
+    Print,
+    /// The selected messages as .eml files, in a folder the user picks.
+    Export,
     /// Opens the "add an account" dialog.
     AddAccount,
     AddMicrosoftAccount,

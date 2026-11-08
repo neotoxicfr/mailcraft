@@ -723,6 +723,13 @@ fn message_row(
             pick(Some(Command::Archive), ui);
         }
         ui.separator();
+        if ui.button(T::Print.get(lang)).clicked() {
+            pick(Some(Command::Print), ui);
+        }
+        if ui.button(T::Export.get(lang)).clicked() {
+            pick(Some(Command::Export), ui);
+        }
+        ui.separator();
         if ui.button(T::Delete.get(lang)).clicked() {
             pick(Some(Command::Delete { permanent: false }), ui);
         }
@@ -1043,6 +1050,9 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
             }
             Status::ServerFound(n) => {
                 ui.label(small(format!("{n} {}", T::ServerFound.get(lang))));
+            }
+            Status::Exported(n) => {
+                ui.label(small(format!("{n} {}", T::ExportedWord.get(lang))));
             }
             Status::UpToDate => {
                 ui.label(small(T::UpToDate.get(lang).into()));

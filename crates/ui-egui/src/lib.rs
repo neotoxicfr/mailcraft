@@ -11,6 +11,7 @@ mod icons;
 pub mod mail;
 mod options;
 mod panes;
+mod print;
 mod reader;
 pub mod settings;
 pub mod shell;
@@ -152,6 +153,30 @@ impl MailCraftApp {
             format!("{count} {}", i18n::T::NewMessagesWord.get(lang))
         };
         Some((title, subject))
+    }
+
+    /// Opens the shown message, laid out for paper, in the browser's print dialog.
+    fn print(&mut self) {
+        let (Some(m), Some(body)) = (self.mail.selected().cloned(), self.mail.body.clone()) else {
+            return;
+        };
+        let prefs = self.settings.get();
+        let lang = Lang::resolve(prefs.general.language);
+        let date = chrono::DateTime::from_timestamp(m.received, 0)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%d/%m/%Y %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let html = print::page(&m, &body, &date, lang, prefs.privacy.block_remote_images);
+        let Some(dir) = craft_settings::paths::data_dir("mailcraft") else {
+            return;
+        };
+        let path = dir.join("impression.html");
+        if let Err(e) = std::fs::write(&path, html).and_then(|()| open::that_detached(&path)) {
+            self.mail.status = Status::Error(format!("{}: {e}", path.display()));
+        }
     }
 
     pub fn french(&self) -> bool {
@@ -329,6 +354,10 @@ impl MailCraftApp {
                 }
                 Event::Changed | Event::BodyReady { .. } => self.dirty = true,
                 Event::Offline { pending, .. } => self.mail.status = Status::Offline { pending },
+                Event::Exported { count, dir } => {
+                    self.mail.status = Status::Exported(count);
+                    let _ = open::that_detached(dir);
+                }
                 Event::ServerSearchDone { found } => {
                     self.mail.status = Status::ServerFound(found);
                     self.dirty = true;
@@ -411,6 +440,24 @@ impl MailCraftApp {
                 self.view.dialog = Some(shell::Dialog::AddAccount {
                     form: Box::default(),
                 });
+            }
+            Command::Print => self.print(),
+            Command::Export => {
+                let selected = self.mail.selected_messages();
+                let account_id = selected.first().map(|m| m.account_id)?;
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    let mut used = std::collections::HashSet::new();
+                    let items = selected
+                        .iter()
+                        .filter(|m| m.account_id == account_id)
+                        .map(|m| (m.id.clone(), print::eml_name(m, &mut used)))
+                        .collect();
+                    self.send(Request::Export {
+                        account_id,
+                        items,
+                        dir,
+                    });
+                }
             }
             Command::SaveAway { away } => {
                 let away = *away;

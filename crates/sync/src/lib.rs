@@ -47,6 +47,12 @@ pub enum Request {
         rules: Vec<Rule>,
         away: Away,
     },
+    /// Writes each message as an .eml file in `dir`: (message id, file name).
+    Export {
+        account_id: i64,
+        items: Vec<(String, String)>,
+        dir: PathBuf,
+    },
     /// The out-of-office reply was changed: set it on Microsoft servers too.
     SetAway {
         away: Away,
@@ -267,6 +273,10 @@ pub enum Event {
     ServerSearchDone {
         found: usize,
     },
+    Exported {
+        count: usize,
+        dir: PathBuf,
+    },
     Error(String),
 }
 
@@ -411,6 +421,26 @@ impl Runner {
                 Ok(())
             }
             Request::SetAway { away } => self.set_away(Some(away)),
+            Request::Export {
+                account_id,
+                items,
+                dir,
+            } => {
+                let imap = self.is_imap(account_id);
+                let mut count = 0;
+                for (id, name) in &items {
+                    let bytes = if imap {
+                        self.with_imap(account_id, |s| s.raw(id))?
+                    } else {
+                        self.with_graph(account_id, |g| g.mime(id))?
+                    };
+                    let path = dir.join(name);
+                    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+                    count += 1;
+                }
+                emit(Event::Exported { count, dir });
+                Ok(())
+            }
             Request::SyncInbox { account_id } => {
                 self.imap_sync_inbox(account_id, emit)?;
                 self.run_automation(account_id, emit)?;

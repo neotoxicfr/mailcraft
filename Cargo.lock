@@ -2978,6 +2978,7 @@ dependencies = [
  "mailcraft-imap",
  "mailcraft-store",
  "mailcraft-sync",
+ "open",
  "rfd",
  "serde",
  "sys-locale",

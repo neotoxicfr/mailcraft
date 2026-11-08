@@ -274,10 +274,20 @@ impl<'a> Graph<'a> {
 
     /// Raw content of a file attachment, for saving or opening it.
     pub fn attachment_bytes(&self, message_id: &str, attachment_id: &str) -> Result<Vec<u8>> {
-        let url = format!("{GRAPH}/me/messages/{message_id}/attachments/{attachment_id}/$value");
+        self.download(&format!(
+            "{GRAPH}/me/messages/{message_id}/attachments/{attachment_id}/$value"
+        ))
+    }
+
+    /// The whole message as it travelled (RFC 5322 / .eml bytes).
+    pub fn mime(&self, message_id: &str) -> Result<Vec<u8>> {
+        self.download(&format!("{GRAPH}/me/messages/{message_id}/$value"))
+    }
+
+    fn download(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self
             .http
-            .get(&url)
+            .get(url)
             .bearer_auth(self.token)
             .header("Prefer", "IdType=\"ImmutableId\"")
             .timeout(Duration::from_secs(600))
@@ -290,10 +300,7 @@ impl<'a> Graph<'a> {
                 .to_vec()),
             StatusCode::UNAUTHORIZED => Err(GraphError::Unauthorized),
             StatusCode::NOT_FOUND => Err(GraphError::NotFound),
-            s => Err(GraphError::Api(
-                s.as_u16(),
-                "attachment download refused".into(),
-            )),
+            s => Err(GraphError::Api(s.as_u16(), "download refused".into())),
         }
     }
 
