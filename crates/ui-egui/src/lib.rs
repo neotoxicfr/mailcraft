@@ -238,6 +238,39 @@ impl MailCraftApp {
     }
 
     /// Settings only, no mail backend (tests, or when the backend cannot start).
+    /// Where the main window was last time (read before the window is created).
+    pub fn saved_window() -> settings::WindowPlace {
+        SettingsStore::<Prefs>::open(Location::Auto).0.get().window
+    }
+
+    /// Keeps the window's place up to date in the settings (not while minimised, and the
+    /// normal size is kept while maximised).
+    fn remember_window(&mut self, ctx: &Context) {
+        let (outer, inner, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.outer_rect,
+                v.inner_rect,
+                v.maximized.unwrap_or(false),
+                v.minimized.unwrap_or(false),
+            )
+        });
+        if minimized {
+            return;
+        }
+        let mut place = self.settings.get().window;
+        place.maximized = maximized;
+        if !maximized && let (Some(outer), Some(inner)) = (outer, inner) {
+            place.x = Some(outer.min.x.round());
+            place.y = Some(outer.min.y.round());
+            place.width = Some(inner.width().round());
+            place.height = Some(inner.height().round());
+        }
+        if place != self.settings.get().window {
+            self.settings.update(|p| p.window = place);
+        }
+    }
+
     pub fn with_location(ctx: &Context, location: Location) -> Self {
         fonts::install(ctx);
         spell::warm_up();
@@ -272,6 +305,9 @@ impl MailCraftApp {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<Command> {
+        if self.integrations {
+            self.remember_window(ui.ctx());
+        }
         let prefs = self.settings.get().clone();
         if self.applied.as_ref() != Some(&prefs.appearance) {
             theme::apply(ui.ctx(), &prefs.appearance);

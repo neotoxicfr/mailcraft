@@ -110,8 +110,17 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let start_hidden = std::env::args().any(|a| a == "--minimized");
+    // Opens where it was closed (position, size, maximised).
+    let place = MailCraftApp::saved_window();
+    let (position, size) = place
+        .usable()
+        .map_or((None, [1280.0, 800.0]), |(p, s)| (Some(p), s));
+    let mut viewport = egui::ViewportBuilder::default();
+    if let Some(p) = position {
+        viewport = viewport.with_position(p);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("MailCraft")
             .with_app_id("mailcraft")
             .with_icon(egui::IconData {
@@ -119,7 +128,8 @@ fn main() -> eframe::Result {
                 width: 64,
                 height: 64,
             })
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size(size)
+            .with_maximized(place.maximized)
             .with_min_inner_size([900.0, 520.0])
             .with_visible(!start_hidden),
         ..Default::default()

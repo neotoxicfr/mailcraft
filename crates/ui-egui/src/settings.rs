@@ -104,6 +104,8 @@ pub struct Prefs {
     pub accounts: Accounts,
     pub cleanup: Cleanup,
     pub startup: Startup,
+    /// Where the main window was, to open it there again.
+    pub window: WindowPlace,
     /// Folder pane: account and folder order, folded sections.
     pub folders: FolderLayout,
     /// What MailCraft does with new mail by itself.
@@ -235,5 +237,28 @@ mod layout_tests {
         assert!(l.folded.contains("fav"));
         l.toggle("fav");
         assert!(l.folded.is_empty());
+    }
+}
+
+/// Position (outer, top-left) and size (inner) of the main window, in points; `None` before the
+/// first run.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+pub struct WindowPlace {
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub maximized: bool,
+}
+
+impl WindowPlace {
+    /// A saved place that can be used: a sensible size, and a position not far off any screen
+    /// (a monitor unplugged since).
+    pub fn usable(&self) -> Option<([f32; 2], [f32; 2])> {
+        let (x, y, w, h) = (self.x?, self.y?, self.width?, self.height?);
+        let fits = (200.0..10_000.0).contains(&w) && (200.0..10_000.0).contains(&h);
+        let near = (-200.0..8_000.0).contains(&x) && (-200.0..5_000.0).contains(&y);
+        (fits && near).then_some(([x, y], [w, h]))
     }
 }
