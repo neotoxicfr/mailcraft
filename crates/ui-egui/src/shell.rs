@@ -2,11 +2,13 @@
 
 use egui::{
     Align, Align2, CentralPanel, Color32, ComboBox, CursorIcon, FontId, Frame, Layout, Margin,
-    Panel, Rect, RichText, Role, Sense, Stroke, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Panel, Rect, Role, Sense, Stroke, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use crate::i18n::{Lang, T};
 use crate::icons::Icon;
+use crate::mail::Mail;
+use crate::panes;
 use crate::settings::{AccentPref, LangPref, Prefs, ThemePref};
 use crate::theme;
 
@@ -35,21 +37,29 @@ pub struct View {
 }
 
 /// What the window asks the app to do.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     Exit,
+    AddAccount,
+    CancelSignIn,
+    SyncAll,
+    SelectFolder { account_id: i64, folder_id: String },
+    SelectMessage { account_id: i64, id: String },
+    SearchChanged,
 }
 
 /// Everything a frame needs besides the mutable state.
 pub struct Ctx<'a> {
     pub lang: Lang,
     pub accent: Color32,
-    pub status_error: Option<&'a str>,
+    pub mail: &'a Mail,
+    pub save_error: Option<&'a str>,
 }
 
 pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Option<Command> {
     let dark = ui.visuals().dark_mode;
     let mut command = None;
+    let mut pane_command = None;
 
     Panel::top("tabs")
         .frame(
@@ -78,23 +88,25 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
                 .fill(theme::ribbon_fill(dark))
                 .inner_margin(Margin::symmetric(8, 3)),
         )
-        .show(ui, |ui| status_bar(ui, c));
+        .show(ui, |ui| panes::status_bar(ui, c, &mut pane_command));
     Panel::left("folders")
         .resizable(true)
-        .default_size(220.0)
-        .size_range(160.0..=400.0)
+        .default_size(240.0)
+        .size_range(160.0..=420.0)
         .frame(pane_frame(ui))
-        .show(ui, |ui| folder_pane(ui, c));
+        .show(ui, |ui| panes::folder_pane(ui, c, &mut pane_command));
     Panel::left("list")
         .resizable(true)
-        .default_size(380.0)
+        .default_size(400.0)
         .size_range(260.0..=700.0)
         .frame(pane_frame(ui))
-        .show(ui, |ui| message_list(ui, c, view, dark));
+        .show(ui, |ui| {
+            panes::message_list(ui, c, view, dark, &mut pane_command)
+        });
     CentralPanel::default()
         .frame(pane_frame(ui))
-        .show(ui, |ui| reading_pane(ui, c));
-    command
+        .show(ui, |ui| panes::reading_pane(ui, c));
+    command.or(pane_command)
 }
 
 fn pane_frame(ui: &Ui) -> Frame {
@@ -148,12 +160,22 @@ fn tab_row(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, dark: bool) {
 fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Command> {
     let lang = c.lang;
     let later = T::AvailableLater.get(lang);
-    let soon = T::ComingSoon.get(lang);
     let mut command = None;
     match tab {
         Tab::File => {
             group(ui, c, T::TabFile, |ui| {
-                big_button(ui, c, Icon::AddAccount, T::AddAccount, false, soon);
+                if big_button(
+                    ui,
+                    c,
+                    Icon::AddAccount,
+                    T::AddAccount,
+                    !c.mail.signing_in,
+                    "",
+                )
+                .clicked()
+                {
+                    command = Some(Command::AddAccount);
+                }
                 if big_button(ui, c, Icon::Exit, T::Exit, true, "").clicked() {
                     command = Some(Command::Exit);
                 }
@@ -190,7 +212,10 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Comma
         }
         Tab::SendReceive => {
             group(ui, c, T::TabSendReceive, |ui| {
-                big_button(ui, c, Icon::Sync, T::SendReceiveAll, false, later);
+                let can = !c.mail.accounts.is_empty();
+                if big_button(ui, c, Icon::Sync, T::SendReceiveAll, can, later).clicked() {
+                    command = Some(Command::SyncAll);
+                }
             });
         }
         Tab::Folder => {
@@ -450,61 +475,4 @@ fn with_tip(response: egui::Response, label: &str, enabled: bool, tip: &str) -> 
     } else {
         response.on_hover_text(tip)
     }
-}
-
-fn status_bar(ui: &mut Ui, c: &Ctx<'_>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(T::StatusNoAccount.get(c.lang)).size(11.0));
-        if let Some(err) = c.status_error {
-            ui.separator();
-            ui.label(
-                RichText::new(format!("{} : {err}", T::SaveFailed.get(c.lang)))
-                    .size(11.0)
-                    .color(ui.visuals().error_fg_color),
-            );
-        }
-    });
-}
-
-fn folder_pane(ui: &mut Ui, c: &Ctx<'_>) {
-    ui.label(RichText::new(T::Favorites.get(c.lang)).strong());
-    ui.add_space(12.0);
-    ui.label(RichText::new(T::NoAccount.get(c.lang)).weak());
-}
-
-fn message_list(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, dark: bool) {
-    ui.add(
-        TextEdit::singleline(&mut view.search)
-            .hint_text(T::SearchHint.get(c.lang))
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(6.0);
-    let weak = ui.visuals().weak_text_color();
-    ui.horizontal(|ui| {
-        for (col, width) in [
-            (T::ColFrom, 110.0),
-            (T::ColSubject, 130.0),
-            (T::ColReceived, 60.0),
-            (T::ColSize, 50.0),
-        ] {
-            ui.add_sized(
-                [width, 18.0],
-                egui::Label::new(RichText::new(col.get(c.lang)).size(12.0).color(weak)),
-            );
-        }
-    });
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top(),
-        Stroke::new(1.0, theme::separator(dark)),
-    );
-    ui.add_space(16.0);
-    ui.vertical_centered(|ui| ui.label(RichText::new(T::EmptyList.get(c.lang)).weak()));
-}
-
-fn reading_pane(ui: &mut Ui, c: &Ctx<'_>) {
-    ui.centered_and_justified(|ui| {
-        ui.label(RichText::new(T::ReadingEmpty.get(c.lang)).size(15.0).weak())
-    });
 }

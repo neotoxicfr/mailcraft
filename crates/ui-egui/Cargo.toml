@@ -15,6 +15,10 @@ serde = { workspace = true }
 craft-settings = { workspace = true }
 log = { workspace = true }
 sys-locale = "0.3"
+mailcraft-store = { workspace = true }
+mailcraft-sync = { workspace = true }
+mailcraft-graph = { workspace = true }
+chrono = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Reads the Windows accent colour (safe API; the workspace forbids unsafe).
@@ -22,3 +26,5 @@ winreg = "0.55"
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
+tempfile = { workspace = true }
+craft-settings = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "mailcraft-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "MailCraft local store: accounts, folders and messages in SQLite (SQLCipher), secrets in the OS vault"
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+keyring-core = { workspace = true }
+aes-gcm = { workspace = true }
+getrandom = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { workspace = true }

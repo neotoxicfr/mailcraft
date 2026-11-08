@@ -19,6 +19,7 @@ pub enum Icon {
     Sync,
     AddAccount,
     Exit,
+    Paperclip,
 }
 
 type Line = &'static [(f32, f32)];
@@ -166,6 +167,19 @@ const EXIT: &[Line] = &[
     &[(0.72, 0.32), (0.9, 0.5), (0.72, 0.68)],
 ];
 
+const PAPERCLIP: &[Line] = &[&[
+    (0.62, 0.3),
+    (0.62, 0.72),
+    (0.55, 0.85),
+    (0.45, 0.85),
+    (0.38, 0.72),
+    (0.38, 0.2),
+    (0.44, 0.1),
+    (0.56, 0.1),
+    (0.62, 0.2),
+    (0.62, 0.3),
+]];
+
 impl Icon {
     fn lines(self) -> &'static [Line] {
         match self {
@@ -184,6 +198,7 @@ impl Icon {
             Self::Sync => SYNC,
             Self::AddAccount => ADD_ACCOUNT,
             Self::Exit => EXIT,
+            Self::Paperclip => PAPERCLIP,
         }
     }
 

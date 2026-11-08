@@ -13,6 +13,26 @@ repository = "https://github.com/neotoxicfr/mailcraft"
 [workspace.dependencies]
 # internal
 mailcraft-ui-egui = { path = "crates/ui-egui" }
+mailcraft-store = { path = "crates/store" }
+mailcraft-graph = { path = "crates/graph" }
+mailcraft-sync = { path = "crates/sync" }
+
+# storage: SQLCipher, built with its bundled libtomcrypt provider (see vendor/libsqlite3-sys)
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher"] }
+keyring-core = "1"
+windows-native-keyring-store = "1.1"
+aes-gcm = "0.11"
+getrandom = "0.4"
+# network: rustls on ring, as in rustcraft-manager (no aws-lc build tools needed)
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "blocking", "json", "form"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = "1"
+sha2 = "0.11"
+base64 = "0.23"
+url = "2.5"
+webbrowser = "1.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tempfile = "3"
 
 # Every craft-libs crate comes from one storytold/craft-libs revision, the one GridCraft pins.
 craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7" }
@@ -59,3 +79,5 @@ egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc79968
 egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
+# SQLCipher on libtomcrypt instead of OpenSSL; the only change is in build.rs (marked "MailCraft patch").
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }

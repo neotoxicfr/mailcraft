@@ -11,6 +11,14 @@ list (author, source, license) is in ATTRIBUTION.md.
 - Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 - egui default fonts, embedded by the egui dependency as fallbacks — see that crate's licenses.
 
+- vendor/libsqlite3-sys — copy of the libsqlite3-sys crate 0.39.1 (rusqlite project), MIT
+  (vendor/libsqlite3-sys/LICENSE), with one change in build.rs marked "MailCraft patch": SQLCipher
+  is built with the libtomcrypt provider instead of OpenSSL. vendor/libsqlite3-sys/
+  mailcraft-libtomcrypt.h is the LibTomCrypt configuration of sqlite-wasm-rs
+  (https://github.com/Spxg/sqlite-wasm-rs, MIT), minus its wasm-only clock override.
+- SQLCipher (BSD-3-Clause), SQLite (public domain) and LibTomCrypt (public domain or WTFPL),
+  compiled from the sqlcipher-src crate (MIT) into the executable.
+
 Original work
 
 - Application-drawn UI icons (crates/ui-egui/src/icons.rs) are original work, MIT OR Apache-2.0.

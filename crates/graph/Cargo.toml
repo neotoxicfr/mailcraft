@@ -1,0 +1,23 @@
+[package]
+name = "mailcraft-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Microsoft account sign-in (OAuth 2.0 + PKCE, loopback redirect) and Microsoft Graph mail client"
+
+[lints]
+workspace = true
+
+[dependencies]
+reqwest = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+url = { workspace = true }
+webbrowser = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }

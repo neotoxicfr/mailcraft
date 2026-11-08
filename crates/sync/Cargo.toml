@@ -1,0 +1,16 @@
+[package]
+name = "mailcraft-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "MailCraft background worker: sign-in, mailbox sync and on-demand fetches, off the UI thread"
+
+[lints]
+workspace = true
+
+[dependencies]
+mailcraft-store = { workspace = true }
+mailcraft-graph = { workspace = true }
+reqwest = { workspace = true }
+log = { workspace = true }

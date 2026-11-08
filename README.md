@@ -9,9 +9,15 @@ reads the `List-Unsubscribe` and authentication headers (SPF, DKIM, DMARC), flag
 phishing senders, unsubscribes in one click where the sender supports it (RFC 8058), and can ask
 Claude to classify senders when an API key is set (optional).
 
-**Status: early work.** Milestone 1 is the shell only: window, ribbon, panes, light/dark theme,
-accent colour (Outlook blue, Windows accent or MailCraft teal), French and English. No account can
-be added yet.
+**Status: early work.**
+
+- Milestone 1: window, ribbon, panes, light/dark theme, accent colour (Outlook blue, Windows
+  accent or MailCraft teal), French and English.
+- Milestone 2: Microsoft accounts (Outlook.com/Hotmail and work accounts). Sign-in in the browser
+  (OAuth 2.0 + PKCE, nothing typed into MailCraft), sync of the last 6 months then changes only,
+  folder tree, message list grouped by date with search, reading pane (plain text for now).
+  The local copy is encrypted by default (SQLCipher); the key lives in Windows Credential Manager
+  and also seals the sign-in tokens, so no secret is ever stored in clear.
 
 ## Planned
 

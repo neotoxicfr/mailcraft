@@ -1,0 +1,341 @@
+//! Microsoft Graph mail: sign-in ([`auth`]) and the few calls MailCraft needs.
+
+pub mod auth;
+
+use std::time::Duration;
+
+use reqwest::StatusCode;
+use reqwest::blocking::{Client, RequestBuilder};
+use serde_json::Value;
+
+const GRAPH: &str = "https://graph.microsoft.com/v1.0";
+// Immutable ids: a message keeps its id when moved between folders.
+const PREFER: &str = "odata.maxpagesize=100, IdType=\"ImmutableId\"";
+const MESSAGE_FIELDS: &str =
+    "id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,flag";
+
+#[derive(Debug)]
+pub enum GraphError {
+    /// The access token is no longer accepted: refresh it and retry.
+    Unauthorized,
+    /// The delta state expired: start the folder again from scratch.
+    SyncReset,
+    NotFound,
+    Network(String),
+    Api(u16, String),
+}
+
+impl std::fmt::Display for GraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized => f.write_str("Microsoft no longer accepts the session"),
+            Self::SyncReset => f.write_str("sync state expired"),
+            Self::NotFound => f.write_str("not found"),
+            Self::Network(e) => write!(f, "network: {e}"),
+            Self::Api(code, e) => write!(f, "Microsoft Graph {code}: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for GraphError {}
+
+pub type Result<T> = std::result::Result<T, GraphError>;
+
+/// HTTPS client shared by sign-in and Graph calls (rustls on ring, system certificates).
+pub fn http_client() -> std::result::Result<Client, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    Client::builder()
+        .user_agent(concat!("MailCraft/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteFolder {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub unread: i64,
+    pub total: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteMessage {
+    pub id: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub subject: String,
+    pub preview: String,
+    pub received: i64,
+    pub is_read: bool,
+    pub has_attachments: bool,
+    pub flagged: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct DeltaPage {
+    pub messages: Vec<RemoteMessage>,
+    pub removed: Vec<String>,
+    pub next: Option<String>,
+    pub delta_link: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RemoteBody {
+    pub text: String,
+    pub to: String,
+    pub cc: String,
+}
+
+pub struct Graph<'a> {
+    http: &'a Client,
+    token: &'a str,
+}
+
+impl<'a> Graph<'a> {
+    pub fn new(http: &'a Client, token: &'a str) -> Self {
+        Self { http, token }
+    }
+
+    fn send(&self, build: impl Fn() -> RequestBuilder) -> Result<Value> {
+        for attempt in 0..4 {
+            let resp = build()
+                .bearer_auth(self.token)
+                .send()
+                .map_err(|e| GraphError::Network(e.to_string()))?;
+            let status = resp.status();
+            if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE
+            {
+                let wait = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2u64 << attempt);
+                std::thread::sleep(Duration::from_secs(wait.min(60)));
+                continue;
+            }
+            return match status {
+                s if s.is_success() => {
+                    let text = resp
+                        .text()
+                        .map_err(|e| GraphError::Network(e.to_string()))?;
+                    Ok(if text.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(&text).unwrap_or(Value::Null)
+                    })
+                }
+                StatusCode::UNAUTHORIZED => Err(GraphError::Unauthorized),
+                StatusCode::NOT_FOUND => Err(GraphError::NotFound),
+                StatusCode::GONE => Err(GraphError::SyncReset),
+                s => {
+                    let body: Value = resp.json().unwrap_or(Value::Null);
+                    let msg = body["error"]["message"].as_str().unwrap_or("").to_owned();
+                    if s == StatusCode::BAD_REQUEST && body["error"]["code"] == "SyncStateNotFound"
+                    {
+                        return Err(GraphError::SyncReset);
+                    }
+                    Err(GraphError::Api(s.as_u16(), msg))
+                }
+            };
+        }
+        Err(GraphError::Api(
+            429,
+            "Microsoft keeps asking to slow down".into(),
+        ))
+    }
+
+    fn get(&self, url: &str) -> Result<Value> {
+        self.send(|| self.http.get(url).header("Prefer", PREFER))
+    }
+
+    /// (e-mail address, display name) of the signed-in user.
+    pub fn me(&self) -> Result<(String, String)> {
+        let v = self.get(&format!(
+            "{GRAPH}/me?$select=displayName,mail,userPrincipalName"
+        ))?;
+        let email = v["mail"]
+            .as_str()
+            .or(v["userPrincipalName"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        Ok((email, v["displayName"].as_str().unwrap_or("").to_owned()))
+    }
+
+    /// Every mail folder, children included (Graph lists one level at a time).
+    pub fn folders(&self) -> Result<Vec<RemoteFolder>> {
+        let mut out = Vec::new();
+        let mut pending = vec![(None, format!("{GRAPH}/me/mailFolders?$top=100"))];
+        while let Some((parent, mut url)) = pending.pop() {
+            loop {
+                let v = self.get(&url)?;
+                for f in v["value"].as_array().into_iter().flatten() {
+                    let id = f["id"].as_str().unwrap_or("").to_owned();
+                    if f["childFolderCount"].as_i64().unwrap_or(0) > 0 {
+                        pending.push((
+                            Some(id.clone()),
+                            format!("{GRAPH}/me/mailFolders/{id}/childFolders?$top=100"),
+                        ));
+                    }
+                    out.push(RemoteFolder {
+                        id,
+                        parent_id: parent.clone(),
+                        name: f["displayName"].as_str().unwrap_or("").to_owned(),
+                        unread: f["unreadItemCount"].as_i64().unwrap_or(0),
+                        total: f["totalItemCount"].as_i64().unwrap_or(0),
+                    });
+                }
+                match v["@odata.nextLink"].as_str() {
+                    Some(next) => url = next.to_owned(),
+                    None => break,
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Id of a well-known folder (`inbox`, `sentitems`…), `None` if the mailbox has none.
+    pub fn well_known_id(&self, role: &str) -> Result<Option<String>> {
+        match self.get(&format!("{GRAPH}/me/mailFolders/{role}?$select=id")) {
+            Ok(v) => Ok(v["id"].as_str().map(str::to_owned)),
+            Err(GraphError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// First delta request of a folder: messages received since `since_unix`, newest first.
+    pub fn delta_start(folder_id: &str, since_unix: i64) -> String {
+        let since = chrono::DateTime::from_timestamp(since_unix, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ");
+        format!(
+            "{GRAPH}/me/mailFolders/{folder_id}/messages/delta?$select={MESSAGE_FIELDS}\
+             &$filter=receivedDateTime+ge+{since}&$orderby=receivedDateTime+desc"
+        )
+    }
+
+    pub fn delta_page(&self, url: &str) -> Result<DeltaPage> {
+        let v = self.get(url)?;
+        Ok(parse_delta(&v))
+    }
+
+    /// Body as plain text (Microsoft converts HTML), with recipients.
+    pub fn body(&self, id: &str) -> Result<RemoteBody> {
+        let url = format!("{GRAPH}/me/messages/{id}?$select=body,toRecipients,ccRecipients");
+        let v = self.send(|| {
+            self.http.get(&url).header(
+                "Prefer",
+                "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"",
+            )
+        })?;
+        Ok(RemoteBody {
+            text: v["body"]["content"].as_str().unwrap_or("").to_owned(),
+            to: recipients(&v["toRecipients"]),
+            cc: recipients(&v["ccRecipients"]),
+        })
+    }
+
+    pub fn set_read(&self, id: &str, read: bool) -> Result<()> {
+        let url = format!("{GRAPH}/me/messages/{id}");
+        self.send(|| {
+            self.http
+                .patch(&url)
+                .header("Prefer", "IdType=\"ImmutableId\"")
+                .json(&serde_json::json!({ "isRead": read }))
+        })
+        .map(|_| ())
+    }
+}
+
+fn recipients(v: &Value) -> String {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| address(&r["emailAddress"]))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn address(e: &Value) -> String {
+    let name = e["name"].as_str().unwrap_or("");
+    let addr = e["address"].as_str().unwrap_or("");
+    if name.is_empty() || name == addr {
+        addr.to_owned()
+    } else {
+        format!("{name} <{addr}>")
+    }
+}
+
+fn parse_delta(v: &Value) -> DeltaPage {
+    let mut page = DeltaPage {
+        next: v["@odata.nextLink"].as_str().map(str::to_owned),
+        delta_link: v["@odata.deltaLink"].as_str().map(str::to_owned),
+        ..DeltaPage::default()
+    };
+    for m in v["value"].as_array().into_iter().flatten() {
+        let id = m["id"].as_str().unwrap_or("").to_owned();
+        if !m["@removed"].is_null() {
+            page.removed.push(id);
+            continue;
+        }
+        let from = &m["from"]["emailAddress"];
+        page.messages.push(RemoteMessage {
+            id,
+            from_name: from["name"].as_str().unwrap_or("").to_owned(),
+            from_addr: from["address"].as_str().unwrap_or("").to_owned(),
+            subject: m["subject"].as_str().unwrap_or("").to_owned(),
+            preview: m["bodyPreview"].as_str().unwrap_or("").to_owned(),
+            received: m["receivedDateTime"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map_or(0, |d| d.timestamp()),
+            is_read: m["isRead"].as_bool().unwrap_or(true),
+            has_attachments: m["hasAttachments"].as_bool().unwrap_or(false),
+            flagged: m["flag"]["flagStatus"] == "flagged",
+        });
+    }
+    page
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Graph, parse_delta};
+
+    #[test]
+    fn delta_page_parsing() {
+        let v = serde_json::json!({
+            "@odata.nextLink": "https://next",
+            "value": [
+                {
+                    "id": "m1",
+                    "subject": "Votre facture",
+                    "bodyPreview": "Bonjour",
+                    "receivedDateTime": "2026-11-08T09:30:00Z",
+                    "isRead": false,
+                    "hasAttachments": true,
+                    "flag": { "flagStatus": "flagged" },
+                    "from": { "emailAddress": { "name": "Example Shop", "address": "billing@example.com" } }
+                },
+                { "id": "m2", "@removed": { "reason": "deleted" } }
+            ]
+        });
+        let p = parse_delta(&v);
+        assert_eq!(p.next.as_deref(), Some("https://next"));
+        assert!(p.delta_link.is_none());
+        assert_eq!(p.removed, ["m2"]);
+        let m = &p.messages[0];
+        assert_eq!(
+            (m.from_addr.as_str(), m.received, m.is_read, m.flagged),
+            ("billing@example.com", 1_794_130_200, false, true)
+        );
+    }
+
+    #[test]
+    fn delta_start_url_filters_by_date() {
+        let url = Graph::delta_start("AQMk", 1_794_130_200);
+        assert!(url.contains("/me/mailFolders/AQMk/messages/delta?$select=id,"));
+        assert!(url.contains("$filter=receivedDateTime+ge+2026-11-08T09:30:00Z"));
+    }
+}
