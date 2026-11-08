@@ -266,3 +266,49 @@ fn full_text_search_ignores_accents_and_follows_changes() {
     s.apply_changes(1, "old", &[], &["b".into()]).unwrap();
     assert!(ids(&s, "budget").is_empty());
 }
+
+#[test]
+fn address_suggestions_prefer_contacts_then_frequent_senders() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    s.upsert_account("microsoft", "user@example.com", "User", "t")
+        .unwrap();
+    s.replace_folders(1, &[folder("inbox", 0)]).unwrap();
+    let from = |id: &str, name: &str, addr: &str| {
+        let mut m = msg(id, "inbox", 1, "x");
+        m.from_name = name.into();
+        m.from_addr = addr.into();
+        m
+    };
+    s.apply_changes(
+        1,
+        "inbox",
+        &[
+            from("1", "Marie Curie", "marie@example.com"),
+            from("2", "Marie Curie", "marie@example.com"),
+            from("3", "Martin Shop", "news@martin.example.com"),
+        ],
+        &[],
+    )
+    .unwrap();
+    s.replace_contacts(1, &[("Marc Dupont".into(), "marc@example.org".into())])
+        .unwrap();
+    let names = |q: &str| {
+        s.address_suggestions(1, q, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names("mar"),
+        [
+            "marc@example.org",
+            "marie@example.com",
+            "news@martin.example.com"
+        ]
+    );
+    assert_eq!(names("curie"), ["marie@example.com"]);
+    assert!(names("m").is_empty());
+    assert!(names("%").is_empty());
+}

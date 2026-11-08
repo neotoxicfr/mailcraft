@@ -538,6 +538,16 @@ fn long_date(ts: i64, lang: Lang) -> String {
 // ---- reading pane ----
 
 pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, command: &mut Option<Command>) {
+    // A reply being written takes the reading pane, as in Outlook.
+    if let Some(comp) = view.composers.iter_mut().find(|k| !k.detached) {
+        let id = comp.id;
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if let Some(action) = crate::composer::show(ui, c, comp) {
+                *command = Some(Command::Composer { id, action });
+            }
+        });
+        return;
+    }
     let several = c.mail.selection.len();
     let Some(m) = c.mail.selected().filter(|_| several <= 1) else {
         let text = if several > 1 {
@@ -703,6 +713,9 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
                     T::Syncing.get(lang),
                     T::MessagesWord.get(lang)
                 )));
+            }
+            Status::Sent => {
+                ui.label(small(T::Sent.get(lang).into()));
             }
             Status::AttachmentSaved => {
                 ui.label(small(T::AttachmentSaved.get(lang).into()));

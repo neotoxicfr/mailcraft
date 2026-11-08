@@ -208,3 +208,42 @@ fn search_box_filters_all_folders_and_escape_clears() {
     h.get_by_label("Example Shop — Votre facture");
     assert!(h.query_by_label("Chercher aussi sur le serveur").is_none());
 }
+
+#[test]
+fn reply_opens_in_the_reading_pane_prefilled() {
+    use egui_kittest::kittest::by;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Example Shop — Votre facture").click();
+    h.run();
+    h.get_by_label("Répondre").click();
+    h.run();
+    h.get(
+        by().role(egui::accesskit::Role::TextInput)
+            .value("RE : Votre facture"),
+    );
+    h.get(
+        by().role(egui::accesskit::Role::TextInput)
+            .value("Example Shop <news@example.com>"),
+    );
+    h.get_by_label("Envoyer");
+    // Nothing typed: closing asks nothing and gives the pane back to the message.
+    h.get_by_label("Fermer").click();
+    h.run();
+    h.get_by_label("Montant : 42 €");
+
+    // Typed text: closing asks first.
+    h.get_by_label("Répondre").click();
+    h.run();
+    let editor = h.get_by_label("message");
+    editor.focus();
+    editor.type_text("Merci");
+    h.run();
+    h.get_by_label("Fermer").click();
+    h.run();
+    h.get_by_label("Enregistrer ce message dans les brouillons ?");
+    h.get_by_label("Ne pas enregistrer").click();
+    h.run();
+    h.get_by_label("Montant : 42 €");
+}

@@ -1,5 +1,6 @@
-// No console window behind the app in release builds.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A desktop app: never a console window, even in development builds (errors go to stderr,
+// which the launcher can redirect to a file).
+#![windows_subsystem = "windows"]
 
 #[cfg(windows)]
 mod webview;

@@ -26,3 +26,6 @@ config.toml.broken*
 /.idea/
 *~
 .DS_Store
+
+# personal checklist, never published
+/A-TESTER.md

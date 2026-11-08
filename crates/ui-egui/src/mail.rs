@@ -19,6 +19,7 @@ pub enum Status {
     },
     UpToDate,
     SearchingServer,
+    Sent,
     AttachmentSaved,
     ServerFound(usize),
     /// Changes made locally wait for the network.

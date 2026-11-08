@@ -14,8 +14,14 @@ use sha2::{Digest, Sha256};
 /// MailCraft's app registration (public client: an identifier, not a secret).
 pub const DEFAULT_CLIENT_ID: &str = "ca8a6658-b155-4705-8186-a72a35a00f1c";
 const AUTHORITY: &str = "https://login.microsoftonline.com/common/oauth2/v2.0";
+/// Asked at sign-in. Contacts.Read came later (address completion): accounts added before it
+/// keep working without it, so sessions are refreshed with [`MAIL_SCOPES`] only.
 pub const SCOPES: &str =
+    "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite Contacts.Read";
+pub const MAIL_SCOPES: &str =
     "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite";
+/// Token for the address book only; fails if the user never consented to it.
+pub const CONTACTS_SCOPES: &str = "offline_access Contacts.Read";
 
 #[derive(Debug)]
 pub enum AuthError {
@@ -116,15 +122,21 @@ pub fn sign_in(
     )
 }
 
-/// New access token from a refresh token. Microsoft may rotate the refresh token: keep the returned one.
-pub fn refresh(http: &Client, client_id: &str, refresh_token: &str) -> Result<Tokens, AuthError> {
+/// New access token from a refresh token, for `scopes` (usually [`MAIL_SCOPES`]). Microsoft may
+/// rotate the refresh token: keep the returned one.
+pub fn refresh(
+    http: &Client,
+    client_id: &str,
+    refresh_token: &str,
+    scopes: &str,
+) -> Result<Tokens, AuthError> {
     token_request(
         http,
         &[
             ("client_id", client_id),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-            ("scope", SCOPES),
+            ("scope", scopes),
         ],
     )
     .map(|mut t| {

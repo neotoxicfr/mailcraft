@@ -276,7 +276,72 @@ impl Store {
                 COMMIT;",
             )?;
         }
+        if version < 5 {
+            self.conn.execute_batch(
+                "BEGIN;
+                CREATE TABLE contacts (
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    address TEXT NOT NULL COLLATE NOCASE,
+                    PRIMARY KEY (account_id, address)
+                );
+                PRAGMA user_version = 5;
+                COMMIT;",
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn replace_contacts(
+        &mut self,
+        account_id: i64,
+        contacts: &[(String, String)],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM contacts WHERE account_id = ?1", [account_id])?;
+        for (name, address) in contacts {
+            tx.execute(
+                "INSERT OR IGNORE INTO contacts (account_id, name, address) VALUES (?1, ?2, ?3)",
+                params![account_id, name, address],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Addresses for completion: contacts first, then senders by how often they wrote. Matches
+    /// the start of the address or of any word of the name.
+    pub fn address_suggestions(
+        &self,
+        account_id: i64,
+        typed: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let typed = typed
+            .trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        if typed.chars().count() < 2 {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare(
+            "SELECT name, address FROM (
+                SELECT name, address, 1000000 AS weight FROM contacts WHERE account_id = ?1
+                UNION ALL
+                SELECT MAX(from_name), from_addr, COUNT(*) FROM messages
+                WHERE account_id = ?1 AND from_addr != '' GROUP BY from_addr COLLATE NOCASE
+             )
+             WHERE address LIKE ?2 || '%' ESCAPE '\\' OR name LIKE ?2 || '%' ESCAPE '\\'
+                OR name LIKE '% ' || ?2 || '%' ESCAPE '\\'
+             GROUP BY address COLLATE NOCASE
+             ORDER BY MAX(weight) DESC, name
+             LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![account_id, typed, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Messages of the account matching every word of `query` (the last one as a prefix, so

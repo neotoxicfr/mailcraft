@@ -8,6 +8,8 @@
 use scraper::{ElementRef, Html, Node};
 
 /// Upper bound on blocks kept from one message, so a hostile 50 MB mail cannot stall the UI.
+pub mod doc;
+
 pub const MAX_BLOCKS: usize = 5_000;
 /// Element nesting followed before falling back to plain text (keeps the stack small).
 const MAX_DEPTH: usize = 128;

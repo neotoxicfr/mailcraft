@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use mailcraft_graph::auth::{self, AuthError, Tokens};
+use mailcraft_graph::compose::{Base, Outgoing};
 use mailcraft_graph::{Graph, GraphError, Op};
 use mailcraft_store::{Attachment, Folder, MasterKey, MessageBody, MessageSummary, ROLES, Store};
 use reqwest::blocking::Client;
@@ -94,6 +95,27 @@ pub enum Request {
         account_id: i64,
         query: String,
     },
+    /// Creates or updates the server draft of composer `composer`.
+    SaveDraft {
+        composer: u64,
+        account_id: i64,
+        base: Compose,
+        draft_id: Option<String>,
+        out: Outgoing,
+    },
+    /// Saves the draft, adds the attachments, sends it.
+    Send {
+        composer: u64,
+        account_id: i64,
+        base: Compose,
+        draft_id: Option<String>,
+        out: Outgoing,
+        attachments: Vec<PathBuf>,
+    },
+    DiscardDraft {
+        account_id: i64,
+        draft_id: String,
+    },
 }
 
 /// A message change made locally, kept in the store until Microsoft accepts it.
@@ -150,6 +172,17 @@ pub enum Event {
     },
     AttachmentSaved {
         path: PathBuf,
+    },
+    DraftSaved {
+        composer: u64,
+        draft_id: String,
+    },
+    Sent {
+        composer: u64,
+    },
+    SendFailed {
+        composer: u64,
+        error: String,
     },
     /// Changes could not be sent; they wait for the next sync.
     Offline {
@@ -222,6 +255,10 @@ struct Runner {
     images: Client,
     side: Side,
     roles: HashMap<i64, HashMap<String, String>>,
+    /// Quoted part Microsoft put in each reply/forward draft, kept under the user's text.
+    quoted: HashMap<String, String>,
+    /// Accounts whose address book was read this run.
+    contacts_done: std::collections::HashSet<i64>,
 }
 
 impl Runner {
@@ -238,6 +275,8 @@ impl Runner {
             images: image_client()?,
             side,
             roles: HashMap::new(),
+            quoted: HashMap::new(),
+            contacts_done: std::collections::HashSet::new(),
         })
     }
 
@@ -444,6 +483,50 @@ impl Runner {
                 // Its messages now sit in Deleted Items on the server.
                 self.sync_account(account_id, emit)
             }
+            Request::SaveDraft {
+                composer,
+                account_id,
+                base,
+                draft_id,
+                out,
+            } => {
+                let draft_id = self.save_draft(account_id, &base, draft_id, &out)?;
+                emit(Event::DraftSaved { composer, draft_id });
+                Ok(())
+            }
+            Request::Send {
+                composer,
+                account_id,
+                base,
+                draft_id,
+                out,
+                attachments,
+            } => {
+                let result = self.send_message(
+                    account_id,
+                    &base,
+                    draft_id,
+                    &out,
+                    &attachments,
+                    composer,
+                    emit,
+                );
+                match result {
+                    Ok(()) => emit(Event::Sent { composer }),
+                    Err(error) => emit(Event::SendFailed { composer, error }),
+                }
+                Ok(())
+            }
+            Request::DiscardDraft {
+                account_id,
+                draft_id,
+            } => {
+                self.quoted.remove(&draft_id);
+                match self.try_graph(account_id, |g| g.apply(&Op::Delete { id: &draft_id })) {
+                    Ok(_) | Err(GraphError::NotFound) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
             Request::SearchServer { account_id, query } => {
                 let found = self.with_graph(account_id, |g| g.search(&query, 100))?;
                 let known: Vec<String> = self
@@ -564,8 +647,13 @@ impl Runner {
             .refresh_token(account_id)
             .map_err(|e| e.to_string())?
             .ok_or("no saved session for this account: add it again")?;
-        let tokens = auth::refresh(&self.http, &self.config.client_id, &refresh)
-            .map_err(|e| e.to_string())?;
+        let tokens = auth::refresh(
+            &self.http,
+            &self.config.client_id,
+            &refresh,
+            auth::MAIL_SCOPES,
+        )
+        .map_err(|e| e.to_string())?;
         if tokens.refresh != refresh {
             self.store
                 .set_refresh_token(account_id, &tokens.refresh)
@@ -644,7 +732,89 @@ impl Runner {
 
     fn sync_account(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
         let folders = self.refresh_folders(account_id, emit)?;
-        self.sync_folders(account_id, &folders, emit)
+        self.sync_folders(account_id, &folders, emit)?;
+        if self.contacts_done.insert(account_id) {
+            self.sync_contacts(account_id);
+        }
+        Ok(())
+    }
+
+    /// Reads the address book for completion. Needs Contacts.Read, which accounts added before
+    /// it was asked for do not have: then completion uses known senders only, silently.
+    fn sync_contacts(&mut self, account_id: i64) {
+        let Ok(Some(refresh)) = self.store.refresh_token(account_id) else {
+            return;
+        };
+        let tokens = match auth::refresh(
+            &self.http,
+            &self.config.client_id,
+            &refresh,
+            auth::CONTACTS_SCOPES,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                log::info!("address book not available: {e}");
+                return;
+            }
+        };
+        match Graph::new(&self.http, &tokens.access).contacts() {
+            Ok(list) => {
+                if let Err(e) = self.store.replace_contacts(account_id, &list) {
+                    log::warn!("address book not stored: {e}");
+                }
+            }
+            Err(e) => log::info!("address book not read: {e}"),
+        }
+    }
+
+    fn save_draft(
+        &mut self,
+        account_id: i64,
+        base: &Compose,
+        draft_id: Option<String>,
+        out: &Outgoing,
+    ) -> Result<String, String> {
+        let quoted = draft_id.as_ref().and_then(|d| self.quoted.get(d).cloned());
+        let (id, quoted) = self.with_graph(account_id, |g| {
+            g.save_draft(draft_id.as_deref(), base.base(), out, quoted.as_deref())
+        })?;
+        self.quoted.insert(id.clone(), quoted);
+        Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_message(
+        &mut self,
+        account_id: i64,
+        base: &Compose,
+        draft_id: Option<String>,
+        out: &Outgoing,
+        attachments: &[PathBuf],
+        composer: u64,
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
+        // Read the files first: a missing one stops the send before anything reaches Microsoft.
+        let mut files = Vec::new();
+        for path in attachments {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let name = path.file_name().map_or_else(
+                || "piece-jointe".into(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            files.push((name, bytes));
+        }
+        let id = self.save_draft(account_id, base, draft_id, out)?;
+        // The draft exists from here on: if a later step fails, the composer keeps its id.
+        emit(Event::DraftSaved {
+            composer,
+            draft_id: id.clone(),
+        });
+        for (name, bytes) in &files {
+            self.with_graph(account_id, |g| g.attach(&id, name, bytes))?;
+        }
+        self.with_graph(account_id, |g| g.send_draft(&id))?;
+        self.quoted.remove(&id);
+        Ok(())
     }
 
     fn sync_folders(
@@ -832,5 +1002,25 @@ mod tests {
         }
         assert!(!local("https://cdn.example.com/logo.png"));
         assert!(!local("https://93.184.215.14/logo.png"));
+    }
+}
+
+/// What a draft starts from (owned, to cross the channel).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Compose {
+    New,
+    Reply(String),
+    ReplyAll(String),
+    Forward(String),
+}
+
+impl Compose {
+    fn base(&self) -> Base<'_> {
+        match self {
+            Self::New => Base::New,
+            Self::Reply(m) => Base::Reply(m),
+            Self::ReplyAll(m) => Base::ReplyAll(m),
+            Self::Forward(m) => Base::Forward(m),
+        }
     }
 }

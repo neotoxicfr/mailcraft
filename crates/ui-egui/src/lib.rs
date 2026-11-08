@@ -1,6 +1,7 @@
 //! MailCraft user interface.
 
 mod attachments;
+mod composer;
 mod fonts;
 pub mod i18n;
 mod icons;
@@ -46,6 +47,7 @@ pub struct MailCraftApp {
     dirty: bool,
     /// Moves that Ctrl+Z puts back, newest last.
     undo: Vec<Undo>,
+    next_composer: u64,
 }
 
 impl MailCraftApp {
@@ -78,6 +80,7 @@ impl MailCraftApp {
             backend: None,
             dirty: false,
             undo: Vec::new(),
+            next_composer: 1,
         }
     }
 
@@ -109,15 +112,21 @@ impl MailCraftApp {
             }
         }
 
-        let c = shell::Ctx {
-            lang: Lang::resolve(prefs.general.language),
-            accent: theme::accent(prefs.appearance.accent),
-            mail: &self.mail,
-            save_error: self.save_error.as_deref(),
-            block_images: prefs.privacy.block_remote_images,
-        };
         let mut next = prefs.clone();
-        let command = shell::show(ui, &c, &mut self.view, &mut next);
+        // Scoped: the context borrows the store and the mail only while the window is drawn.
+        let command = {
+            let store = self.backend.as_ref().map(|b| &b.store);
+            let suggest = store.map(suggester);
+            let c = shell::Ctx {
+                lang: Lang::resolve(prefs.general.language),
+                accent: theme::accent(prefs.appearance.accent),
+                mail: &self.mail,
+                save_error: self.save_error.as_deref(),
+                block_images: prefs.privacy.block_remote_images,
+                suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
+            };
+            shell::show(ui, &c, &mut self.view, &mut next)
+        };
         if next != prefs {
             self.settings.update(|p| *p = next);
         }
@@ -126,7 +135,15 @@ impl MailCraftApp {
                 self.send(Request::FetchImage { url });
             }
         }
-        let command = command.and_then(|cmd| self.run(cmd));
+        let mut command = command.and_then(|cmd| self.run(cmd));
+        if let Some(cmd) = self.composer_windows(ui.ctx(), &prefs) {
+            command = self.run(cmd).or(command);
+        }
+        self.autosave_drafts();
+        if self.view.composers.iter().any(|k| k.changed_at.is_some()) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(5));
+        }
 
         let tick = self.settings.tick(Instant::now());
         match &tick.status {
@@ -218,6 +235,21 @@ impl MailCraftApp {
                     }
                 }
                 Event::AttachmentSaved { .. } => self.mail.status = Status::AttachmentSaved,
+                Event::DraftSaved { composer, draft_id } => {
+                    if let Some(k) = self.view.composers.iter_mut().find(|k| k.id == composer) {
+                        k.draft_id = Some(draft_id);
+                    }
+                }
+                Event::Sent { composer } => {
+                    self.view.composers.retain(|k| k.id != composer);
+                    self.mail.status = Status::Sent;
+                }
+                Event::SendFailed { composer, error } => {
+                    if let Some(k) = self.view.composers.iter_mut().find(|k| k.id == composer) {
+                        k.sending = false;
+                        k.error = Some(error);
+                    }
+                }
                 Event::Error(e) => {
                     self.mail.signing_in = false;
                     self.mail.status = Status::Error(e);
@@ -324,6 +356,29 @@ impl MailCraftApp {
                         open,
                     });
                 }
+            }
+            Command::NewMessage => {
+                let account = self.mail.folder.as_ref().map(|(a, _)| *a).or(self
+                    .mail
+                    .accounts
+                    .first()
+                    .map(|a| a.id));
+                if let Some(account_id) = account {
+                    let mut k = self.new_composer(account_id, composer::Kind::New);
+                    k.detached = true;
+                    self.view.composers.push(k);
+                }
+            }
+            Command::Reply(kind) => self.start_reply(kind),
+            Command::Composer { id, action } => self.composer_action(id, action),
+            Command::SaveSignature { email, text } => {
+                self.settings.update(|p| {
+                    if text.is_empty() {
+                        p.accounts.signatures.remove(&email);
+                    } else {
+                        p.accounts.signatures.insert(email, text);
+                    }
+                });
             }
             Command::SearchServer => {
                 if let Some((account_id, _)) = self.mail.folder.clone() {
@@ -598,6 +653,295 @@ impl MailCraftApp {
     }
 
     /// Writes pending settings; call on exit.
+    fn new_composer(&mut self, account_id: i64, kind: composer::Kind) -> composer::Composer {
+        let id = self.next_composer;
+        self.next_composer += 1;
+        let mut k = composer::Composer::new(id, account_id, kind);
+        let email = self
+            .mail
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.email.clone());
+        if let Some(sig) =
+            email.and_then(|e| self.settings.get().accounts.signatures.get(&e).cloned())
+        {
+            k.doc = mailcraft_html::doc::Doc::plain(&format!("\n\n-- \n{sig}"));
+        }
+        k
+    }
+
+    /// Reply, reply all or forward the shown message, in the reading pane.
+    fn start_reply(&mut self, kind: shell::ReplyKind) {
+        use shell::ReplyKind;
+        let Some(m) = self.mail.selected().cloned() else {
+            return;
+        };
+        // One reply at a time in the pane; another one goes to its own window.
+        let inline_taken = self.view.composers.iter().any(|k| !k.detached);
+        let lang = Lang::resolve(self.settings.get().general.language);
+        let own = self
+            .mail
+            .accounts
+            .iter()
+            .find(|a| a.id == m.account_id)
+            .map(|a| a.email.to_lowercase());
+        let body = self.mail.body.clone().unwrap_or_default();
+        let sender = if m.from_name.is_empty() {
+            m.from_addr.clone()
+        } else {
+            format!("{} <{}>", m.from_name, m.from_addr)
+        };
+        let (ck, prefix) = match kind {
+            ReplyKind::Reply => (
+                composer::Kind::Reply {
+                    original: m.id.clone(),
+                },
+                i18n::T::ReplyPrefix,
+            ),
+            ReplyKind::ReplyAll => (
+                composer::Kind::ReplyAll {
+                    original: m.id.clone(),
+                },
+                i18n::T::ReplyPrefix,
+            ),
+            ReplyKind::Forward => (
+                composer::Kind::Forward {
+                    original: m.id.clone(),
+                },
+                i18n::T::ForwardPrefix,
+            ),
+        };
+        let mut k = self.new_composer(m.account_id, ck);
+        k.detached = inline_taken;
+        let prefix = prefix.get(lang);
+        let bare = |s: &str| {
+            let t = s.trim_start();
+            ["RE:", "RE :", "TR:", "TR :", "FW:", "FWD:"]
+                .iter()
+                .any(|p| t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p))
+        };
+        k.subject = if bare(&m.subject) {
+            m.subject.clone()
+        } else {
+            format!("{prefix}{}", m.subject)
+        };
+        let not_me = |a: &&str| {
+            own.as_deref()
+                .is_none_or(|me| !a.to_lowercase().contains(me))
+        };
+        match kind {
+            ReplyKind::Reply => k.to = sender.clone(),
+            ReplyKind::ReplyAll => {
+                let mut to = vec![sender.as_str()];
+                to.extend(
+                    body.to
+                        .split(';')
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                        .filter(not_me),
+                );
+                k.to = to.join("; ");
+                k.cc = body
+                    .cc
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .filter(not_me)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+            }
+            ReplyKind::Forward => {}
+        }
+        k.quoted = self.mail.blocks.clone();
+        k.quoted_header = format!("{} — {sender}", i18n::T::OriginalMessage.get(lang));
+        self.view.composers.push(k);
+    }
+
+    fn outgoing(k: &composer::Composer) -> mailcraft_graph::compose::Outgoing {
+        use mailcraft_graph::compose::split_recipients;
+        mailcraft_graph::compose::Outgoing {
+            subject: k.subject.trim().to_owned(),
+            html: k.doc.to_html(),
+            to: split_recipients(&k.to),
+            cc: split_recipients(&k.cc),
+            bcc: split_recipients(&k.bcc),
+        }
+    }
+
+    fn compose_base(kind: &composer::Kind) -> mailcraft_sync::Compose {
+        use mailcraft_sync::Compose;
+        match kind {
+            composer::Kind::New => Compose::New,
+            composer::Kind::Reply { original } => Compose::Reply(original.clone()),
+            composer::Kind::ReplyAll { original } => Compose::ReplyAll(original.clone()),
+            composer::Kind::Forward { original } => Compose::Forward(original.clone()),
+        }
+    }
+
+    fn composer_action(&mut self, id: u64, action: composer::Action) {
+        let Some(pos) = self.view.composers.iter().position(|k| k.id == id) else {
+            return;
+        };
+        match action {
+            composer::Action::Send => {
+                let k = &mut self.view.composers[pos];
+                let out = Self::outgoing(k);
+                if out.to.is_empty() && out.cc.is_empty() && out.bcc.is_empty() {
+                    k.error = Some(
+                        i18n::T::NoRecipient
+                            .get(Lang::resolve(self.settings.get().general.language))
+                            .into(),
+                    );
+                    return;
+                }
+                if let Some(bad) = [&k.to, &k.cc, &k.bcc]
+                    .iter()
+                    .flat_map(|f| mailcraft_graph::compose::split_recipients(f))
+                    .find(|r| mailcraft_graph::compose::recipient(r).is_none())
+                {
+                    k.error = Some(format!(
+                        "{} {bad}",
+                        i18n::T::BadAddress
+                            .get(Lang::resolve(self.settings.get().general.language))
+                    ));
+                    return;
+                }
+                k.sending = true;
+                k.error = None;
+                let request = Request::Send {
+                    composer: k.id,
+                    account_id: k.account_id,
+                    base: Self::compose_base(&k.kind),
+                    draft_id: k.draft_id.clone(),
+                    out,
+                    attachments: k.attachments.clone(),
+                };
+                self.send(request);
+            }
+            composer::Action::PickAttachments => {
+                if let Some(files) = rfd::FileDialog::new().pick_files() {
+                    let k = &mut self.view.composers[pos];
+                    k.attachments.extend(files);
+                    k.changed_at = Some(Instant::now());
+                }
+            }
+            composer::Action::Detach => self.view.composers[pos].detached = true,
+            composer::Action::Close(choice) => {
+                let k = &self.view.composers[pos];
+                match choice {
+                    None if k.has_content() && !k.sending => {
+                        self.view.composers[pos].confirm_close = true
+                    }
+                    Some(true) => {
+                        let request = Request::SaveDraft {
+                            composer: k.id,
+                            account_id: k.account_id,
+                            base: Self::compose_base(&k.kind),
+                            draft_id: k.draft_id.clone(),
+                            out: Self::outgoing(k),
+                        };
+                        self.send(request);
+                        self.view.composers.remove(pos);
+                    }
+                    _ => {
+                        if let Some(draft_id) = k.draft_id.clone() {
+                            self.send(Request::DiscardDraft {
+                                account_id: k.account_id,
+                                draft_id,
+                            });
+                        }
+                        self.view.composers.remove(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Detached composers, each in its own window (viewport).
+    fn composer_windows(&mut self, ctx: &Context, prefs: &Prefs) -> Option<Command> {
+        let lang = Lang::resolve(prefs.general.language);
+        let accent = theme::accent(prefs.appearance.accent);
+        let mut out = None;
+        let mail = &self.mail;
+        let store = self.backend.as_ref().map(|b| &b.store);
+        let finder = store.map(suggester);
+        let suggest = finder.as_ref();
+        for k in self.view.composers.iter_mut().filter(|k| k.detached) {
+            let title = if k.subject.trim().is_empty() {
+                i18n::T::NewMessage.get(lang).to_owned()
+            } else {
+                k.subject.clone()
+            };
+            let id = k.id;
+            let builder = egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([820.0, 680.0]);
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of(("composer", id)),
+                builder,
+                |ui, _| {
+                    let c = shell::Ctx {
+                        lang,
+                        accent,
+                        mail,
+                        save_error: None,
+                        block_images: prefs.privacy.block_remote_images,
+                        suggest: suggest.map(|f| f as &shell::Suggest<'_>),
+                    };
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink(false)
+                            .show(ui, |ui| {
+                                if let Some(action) = composer::show(ui, &c, k) {
+                                    out = Some(Command::Composer { id, action });
+                                }
+                            });
+                    });
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        // Closing the window goes through the same question as the Close button.
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        out = Some(Command::Composer {
+                            id,
+                            action: composer::Action::Close(None),
+                        });
+                    }
+                },
+            );
+        }
+        out
+    }
+
+    /// Every 30 s of quiet after a change, the server draft is updated (text and recipients;
+    /// attachments go up when sending).
+    fn autosave_drafts(&mut self) {
+        let due: Vec<usize> = self
+            .view
+            .composers
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| {
+                !k.sending
+                    && k.has_content()
+                    && k.changed_at.is_some_and(|t| t.elapsed().as_secs() >= 30)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in due {
+            let k = &mut self.view.composers[i];
+            k.changed_at = None;
+            let request = Request::SaveDraft {
+                composer: k.id,
+                account_id: k.account_id,
+                base: Self::compose_base(&k.kind),
+                draft_id: k.draft_id.clone(),
+                out: Self::outgoing(k),
+            };
+            self.send(request);
+        }
+    }
+
     pub fn flush(&mut self) {
         if let Err(err) = self.settings.flush() {
             log::warn!("settings not saved on exit: {err}");
@@ -639,4 +983,13 @@ fn hash(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// Address completion from the local store (contacts, then frequent senders).
+fn suggester(store: &Store) -> impl Fn(i64, &str) -> Vec<(String, String)> + '_ {
+    move |account, typed| {
+        store
+            .address_suggestions(account, typed, 8)
+            .unwrap_or_default()
+    }
 }

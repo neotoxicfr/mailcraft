@@ -2,7 +2,7 @@
 
 use egui::{
     Align, Align2, CentralPanel, Color32, ComboBox, CursorIcon, FontId, Frame, Layout, Margin,
-    Panel, Rect, Role, Sense, Stroke, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Panel, Rect, RichText, Role, Sense, Stroke, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use crate::i18n::{Lang, T};
@@ -41,7 +41,12 @@ pub struct View {
     pub webview: Option<egui::Rect>,
     /// Remote images the reader wants, to send to the worker.
     pub image_requests: Vec<String>,
+    /// Messages being written: in the reading pane, or in their own window when detached.
+    pub composers: Vec<crate::composer::Composer>,
 }
+
+/// Address completion: (account, typed text) → (name, address) pairs.
+pub type Suggest<'a> = dyn Fn(i64, &str) -> Vec<(String, String)> + 'a;
 
 /// A question the window asks before acting.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -60,6 +65,15 @@ pub enum Dialog {
         id: String,
         name: String,
     },
+    /// Signature of one account, edited as plain text.
+    Signature { email: String, text: String },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReplyKind {
+    Reply,
+    ReplyAll,
+    Forward,
 }
 
 /// How a click changes the message selection.
@@ -101,6 +115,17 @@ pub enum Command {
     SaveAttachment {
         index: usize,
     },
+    NewMessage,
+    Reply(ReplyKind),
+    /// A composer (by id) asks something.
+    Composer {
+        id: u64,
+        action: crate::composer::Action,
+    },
+    SaveSignature {
+        email: String,
+        text: String,
+    },
     /// Selected messages to Deleted Items, or for good when `permanent` (already confirmed).
     Delete {
         permanent: bool,
@@ -136,6 +161,8 @@ pub struct Ctx<'a> {
     pub save_error: Option<&'a str>,
     /// Remote images stay blocked (tracker blocker on).
     pub block_images: bool,
+    /// Address completion: (account, typed text) → (name, address).
+    pub suggest: Option<&'a Suggest<'a>>,
 }
 
 pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Option<Command> {
@@ -319,6 +346,32 @@ fn dialog(ctx: &egui::Context, c: &Ctx<'_>, state: &mut Option<Dialog>) -> Optio
                     }
                 });
             }
+            Dialog::Signature { email, text } => {
+                ui.heading(T::Signature.get(lang));
+                ui.label(RichText::new(email).weak());
+                let mut edited = text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut edited)
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY),
+                );
+                if let Some(Dialog::Signature { text, .. }) = state.as_mut() {
+                    *text = edited.clone();
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::Ok.get(lang)).clicked() {
+                        result = Some(Command::SaveSignature {
+                            email: email.clone(),
+                            text: edited.trim_end().to_owned(),
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
             Dialog::ConfirmDeleteFolder {
                 account_id,
                 id,
@@ -421,6 +474,20 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                 {
                     command = Some(Command::AddAccount);
                 }
+                if let Some(account) = c.mail.accounts.first()
+                    && big_button(ui, c, Icon::Rename, T::Signature, true, "").clicked()
+                {
+                    let text = prefs
+                        .accounts
+                        .signatures
+                        .get(&account.email)
+                        .cloned()
+                        .unwrap_or_default();
+                    view.dialog = Some(Dialog::Signature {
+                        email: account.email.clone(),
+                        text,
+                    });
+                }
                 if big_button(ui, c, Icon::Exit, T::Exit, true, "").clicked() {
                     command = Some(Command::Exit);
                 }
@@ -428,7 +495,19 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
         }
         Tab::Home => {
             group(ui, c, T::GroupNew, |ui| {
-                big_button(ui, c, Icon::Envelope, T::NewEmail, false, later);
+                let can = !c.mail.accounts.is_empty();
+                if big_button(
+                    ui,
+                    c,
+                    Icon::Envelope,
+                    T::NewEmail,
+                    can,
+                    T::StatusNoAccount.get(lang),
+                )
+                .clicked()
+                {
+                    command = Some(Command::NewMessage);
+                }
             });
             group(ui, c, T::GroupDelete, |ui| {
                 if big_button(ui, c, Icon::Trash, T::Delete, has_selection, pick_first).clicked() {
@@ -453,9 +532,16 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
             });
             group(ui, c, T::GroupRespond, |ui| {
                 ui.vertical(|ui| {
-                    small_button(ui, c, Icon::Reply, T::Reply, false, later);
-                    small_button(ui, c, Icon::ReplyAll, T::ReplyAll, false, later);
-                    small_button(ui, c, Icon::Forward, T::Forward, false, later);
+                    let one = c.mail.selection.len() == 1 && c.mail.selected().is_some();
+                    if small_button(ui, c, Icon::Reply, T::Reply, one, pick_first).clicked() {
+                        command = Some(Command::Reply(ReplyKind::Reply));
+                    }
+                    if small_button(ui, c, Icon::ReplyAll, T::ReplyAll, one, pick_first).clicked() {
+                        command = Some(Command::Reply(ReplyKind::ReplyAll));
+                    }
+                    if small_button(ui, c, Icon::Forward, T::Forward, one, pick_first).clicked() {
+                        command = Some(Command::Reply(ReplyKind::Forward));
+                    }
                 });
             });
             group(ui, c, T::GroupMove, |ui| {

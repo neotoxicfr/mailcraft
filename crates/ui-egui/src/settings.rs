@@ -80,6 +80,8 @@ impl Default for Privacy {
 pub struct Accounts {
     /// Another Microsoft app registration to sign in with; empty for MailCraft's own.
     pub microsoft_client_id: String,
+    /// Signature added to new messages and replies, by account address.
+    pub signatures: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
