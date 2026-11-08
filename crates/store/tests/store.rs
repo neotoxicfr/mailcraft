@@ -185,8 +185,9 @@ fn sync_changes_listing_search_and_read_state() {
         &MessageBody {
             text: "Body".into(),
             to: "me".into(),
-            cc: String::new(),
+            ..MessageBody::default()
         },
+        &[],
     )
     .unwrap();
     assert_eq!(s.body(1, "a").unwrap().unwrap().text, "Body");
@@ -252,8 +253,9 @@ fn full_text_search_ignores_accents_and_follows_changes() {
         &MessageBody {
             text: "Ordre du jour : budget 2027".into(),
             to: String::new(),
-            cc: String::new(),
+            ..MessageBody::default()
         },
+        &[],
     )
     .unwrap();
     assert_eq!(ids(&s, "budget"), ["b"]);

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use mailcraft_graph::auth::{self, AuthError, Tokens};
 use mailcraft_graph::{Graph, GraphError, Op};
-use mailcraft_store::{Folder, MasterKey, MessageBody, MessageSummary, ROLES, Store};
+use mailcraft_store::{Attachment, Folder, MasterKey, MessageBody, MessageSummary, ROLES, Store};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,23 @@ pub enum Request {
     FetchBody {
         account_id: i64,
         id: String,
+    },
+    /// Content of the message's inline (`cid:`) images.
+    FetchInline {
+        account_id: i64,
+        id: String,
+    },
+    /// A remote image shown in a message (http/https only, 5 MB at most).
+    FetchImage {
+        url: String,
+    },
+    /// Writes an attachment to `path`, then opens it with its usual program when `open`.
+    SaveAttachment {
+        account_id: i64,
+        message_id: String,
+        attachment_id: String,
+        path: PathBuf,
+        open: bool,
     },
     /// File messages in another folder (`dest` is a folder id).
     Move {
@@ -120,6 +137,20 @@ pub enum Event {
         account_id: i64,
         id: String,
     },
+    /// Inline images of a message: (content id, bytes).
+    InlineReady {
+        account_id: i64,
+        id: String,
+        images: Vec<(String, Vec<u8>)>,
+    },
+    /// A remote image, or `None` when it could not be loaded.
+    ImageReady {
+        url: String,
+        bytes: Option<Vec<u8>>,
+    },
+    AttachmentSaved {
+        path: PathBuf,
+    },
     /// Changes could not be sent; they wait for the next sync.
     Offline {
         pending: usize,
@@ -140,7 +171,7 @@ pub struct Worker {
 
 impl Worker {
     /// Starts the thread. `wake` is called after each event so the UI repaints.
-    pub fn start(config: Config, wake: Box<dyn Fn() + Send>) -> Self {
+    pub fn start(config: Config, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, requests) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -148,11 +179,12 @@ impl Worker {
         std::thread::Builder::new()
             .name("mailcraft-sync".into())
             .spawn(move || {
+                let side = (events.clone(), wake.clone());
                 let emit = |e: Event| {
                     let _ = events.send(e);
                     wake();
                 };
-                match Runner::new(config, flag) {
+                match Runner::new(config, flag, side) {
                     Ok(mut runner) => runner.run(&requests, &emit),
                     Err(e) => emit(Event::Error(e)),
                 }
@@ -177,17 +209,23 @@ impl Worker {
     }
 }
 
+/// Event sender and repaint callback for work done off the worker thread.
+type Side = (Sender<Event>, Arc<dyn Fn() + Send + Sync>);
+
 struct Runner {
     store: Store,
     http: Client,
     config: Config,
     cancel: Arc<AtomicBool>,
     tokens: HashMap<i64, Tokens>,
+    /// Remote images are fetched on their own threads so they never hold up sync.
+    images: Client,
+    side: Side,
     roles: HashMap<i64, HashMap<String, String>>,
 }
 
 impl Runner {
-    fn new(config: Config, cancel: Arc<AtomicBool>) -> Result<Self, String> {
+    fn new(config: Config, cancel: Arc<AtomicBool>, side: Side) -> Result<Self, String> {
         let store = Store::open(&config.db_path, config.key.clone(), config.encrypt_new)
             .map_err(|e| e.to_string())?;
         let http = mailcraft_graph::http_client()?;
@@ -197,6 +235,8 @@ impl Runner {
             config,
             cancel,
             tokens: HashMap::new(),
+            images: image_client()?,
+            side,
             roles: HashMap::new(),
         })
     }
@@ -238,16 +278,85 @@ impl Runner {
                     .is_none()
                 {
                     let b = self.with_graph(account_id, |g| g.body(&id))?;
+                    let (text, html) = if b.is_html {
+                        (
+                            mailcraft_html::to_text(&mailcraft_html::parse(&b.content)),
+                            b.content,
+                        )
+                    } else {
+                        (b.content, String::new())
+                    };
                     let body = MessageBody {
-                        text: b.text,
+                        text,
+                        html,
                         to: b.to,
                         cc: b.cc,
                     };
+                    let attachments: Vec<Attachment> = b
+                        .attachments
+                        .into_iter()
+                        .map(|a| Attachment {
+                            id: a.id,
+                            name: a.name,
+                            content_type: a.content_type,
+                            size: a.size,
+                            is_inline: a.is_inline,
+                        })
+                        .collect();
                     self.store
-                        .put_body(account_id, &id, &body)
+                        .put_body(account_id, &id, &body, &attachments)
                         .map_err(|e| e.to_string())?;
                 }
                 emit(Event::BodyReady { account_id, id });
+                Ok(())
+            }
+            Request::FetchInline { account_id, id } => {
+                let inline: Vec<String> = self
+                    .store
+                    .attachments(account_id, &id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .filter(|a| a.is_inline && a.size <= MAX_IMAGE as i64)
+                    .map(|a| a.id)
+                    .collect();
+                let mut images = Vec::new();
+                for aid in inline {
+                    let c = self.with_graph(account_id, |g| g.attachment(&id, &aid))?;
+                    if !c.content_id.is_empty() {
+                        images.push((c.content_id, c.bytes));
+                    }
+                }
+                emit(Event::InlineReady {
+                    account_id,
+                    id,
+                    images,
+                });
+                Ok(())
+            }
+            Request::FetchImage { url } => {
+                let (http, (events, wake)) = (self.images.clone(), self.side.clone());
+                std::thread::spawn(move || {
+                    let bytes = fetch_image(&http, &url);
+                    let _ = events.send(Event::ImageReady { url, bytes });
+                    wake();
+                });
+                Ok(())
+            }
+            Request::SaveAttachment {
+                account_id,
+                message_id,
+                attachment_id,
+                path,
+                open,
+            } => {
+                let bytes = self.with_graph(account_id, |g| {
+                    g.attachment_bytes(&message_id, &attachment_id)
+                })?;
+                std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+                if open {
+                    open::that_detached(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                }
+                emit(Event::AttachmentSaved { path });
                 Ok(())
             }
             Request::Move {
@@ -634,5 +743,94 @@ fn summary(account_id: i64, folder_id: &str, m: mailcraft_graph::RemoteMessage) 
         is_read: m.is_read,
         has_attachments: m.has_attachments,
         flagged: m.flagged,
+    }
+}
+
+/// Largest image MailCraft loads into a message (remote or inline).
+pub const MAX_IMAGE: usize = 5 * 1024 * 1024;
+
+/// Client for remote images: follows redirects only to public hosts.
+fn image_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent(concat!("MailCraft/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let local = attempt.url().host().is_none_or(is_local_host);
+            if local || attempt.previous().len() >= 5 {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Downloads a remote image of a message: http(s) only, never to this machine or the local
+/// network (a mail must not make MailCraft probe the LAN), 5 MB at most.
+fn fetch_image(http: &Client, url: &str) -> Option<Vec<u8>> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || is_local_host(parsed.host()?) {
+        return None;
+    }
+    let mut resp = http
+        .get(parsed)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .ok()?;
+    if !resp.status().is_success() || resp.content_length().is_some_and(|n| n > MAX_IMAGE as u64) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut resp, MAX_IMAGE as u64 + 1),
+        &mut bytes,
+    )
+    .ok()?;
+    (bytes.len() <= MAX_IMAGE).then_some(bytes)
+}
+
+fn is_local_host(host: url::Host<&str>) -> bool {
+    use std::net::IpAddr;
+    let ip = match host {
+        url::Host::Domain(d) => {
+            let d = d.to_ascii_lowercase();
+            return d == "localhost"
+                || d.ends_with(".localhost")
+                || d.ends_with(".local")
+                || !d.contains('.');
+        }
+        url::Host::Ipv4(v4) => IpAddr::V4(v4),
+        url::Host::Ipv6(v6) => IpAddr::V6(v6),
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_host;
+
+    #[test]
+    fn local_hosts_are_refused() {
+        let local = |s: &str| is_local_host(url::Url::parse(s).unwrap().host().unwrap());
+        for url in [
+            "http://localhost/x",
+            "http://127.0.0.1/x",
+            "http://192.168.1.10/x",
+            "http://10.0.0.1/x",
+            "http://[::1]/x",
+            "http://nas/x",
+            "http://printer.local/x",
+        ] {
+            assert!(local(url), "{url}");
+        }
+        assert!(!local("https://cdn.example.com/logo.png"));
+        assert!(!local("https://93.184.215.14/logo.png"));
     }
 }

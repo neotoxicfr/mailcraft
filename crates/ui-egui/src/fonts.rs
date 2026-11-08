@@ -31,4 +31,6 @@ pub fn install(ctx: &Context) {
         .families
         .insert(FontFamily::Name("semibold".into()), bold);
     ctx.set_fonts(fonts);
+    // Decoders for images shown in messages (PNG, JPEG, GIF, WebP, BMP).
+    egui_extras::install_image_loaders(ctx);
 }

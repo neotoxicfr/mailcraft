@@ -1,0 +1,13 @@
+[package]
+name = "mailcraft-html"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Mail HTML to simple blocks (paragraphs, headings, lists, links, images) for MailCraft's simplified reader; never runs anything"
+
+[lints]
+workspace = true
+
+[dependencies]
+scraper = { workspace = true }

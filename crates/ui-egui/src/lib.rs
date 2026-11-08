@@ -1,10 +1,12 @@
 //! MailCraft user interface.
 
+mod attachments;
 mod fonts;
 pub mod i18n;
 mod icons;
 pub mod mail;
 mod panes;
+mod reader;
 pub mod settings;
 pub mod shell;
 pub mod theme;
@@ -94,13 +96,16 @@ impl MailCraftApp {
             theme::apply(ui.ctx(), &prefs.appearance);
             self.applied = Some(prefs.appearance.clone());
         }
-        self.handle_events();
+        self.handle_events(ui.ctx());
         if self.dirty {
             self.dirty = false;
             if let Some(b) = &self.backend
                 && let Err(e) = self.mail.reload(&b.store, &self.view.search)
             {
                 self.mail.status = Status::Error(e.to_string());
+            }
+            if let Some((account_id, id)) = self.mail.wants_inline() {
+                self.send(Request::FetchInline { account_id, id });
             }
         }
 
@@ -109,11 +114,17 @@ impl MailCraftApp {
             accent: theme::accent(prefs.appearance.accent),
             mail: &self.mail,
             save_error: self.save_error.as_deref(),
+            block_images: prefs.privacy.block_remote_images,
         };
         let mut next = prefs.clone();
         let command = shell::show(ui, &c, &mut self.view, &mut next);
         if next != prefs {
             self.settings.update(|p| *p = next);
+        }
+        for url in std::mem::take(&mut self.view.image_requests) {
+            if self.mail.images_requested.insert(url.clone()) {
+                self.send(Request::FetchImage { url });
+            }
         }
         let command = command.and_then(|cmd| self.run(cmd));
 
@@ -137,7 +148,25 @@ impl MailCraftApp {
         self.backend.as_ref()?.worker.as_ref()
     }
 
-    fn handle_events(&mut self) {
+    /// Where the original view (WebView) goes this frame and what it shows; `None` hides it
+    /// (no message in original mode, or a dialog that the native view would cover).
+    pub fn original_view(&self) -> Option<(egui::Rect, &str)> {
+        if self.view.dialog.is_some() {
+            return None;
+        }
+        let rect = self.view.webview?;
+        Some((rect, self.mail.original_html.as_str()))
+    }
+
+    /// The WebView could not start (WebView2 runtime missing): back to the simplified view.
+    pub fn original_unavailable(&mut self) {
+        if self.view.original {
+            self.view.original = false;
+            self.mail.status = Status::Error("Edge WebView2 unavailable: original view off".into());
+        }
+    }
+
+    fn handle_events(&mut self, ctx: &Context) {
         let Some(worker) = self.worker() else { return };
         for event in worker.poll() {
             match event {
@@ -170,6 +199,25 @@ impl MailCraftApp {
                     self.mail.status = Status::ServerFound(found);
                     self.dirty = true;
                 }
+                Event::InlineReady {
+                    account_id,
+                    id,
+                    images,
+                } => {
+                    if self.mail.message.as_ref() == Some(&(account_id, id)) {
+                        for (cid, bytes) in &images {
+                            ctx.include_bytes(format!("bytes://cid/{cid}"), bytes.clone());
+                        }
+                        self.mail.set_inline(images);
+                    }
+                }
+                Event::ImageReady { url, bytes } => {
+                    if let Some(bytes) = bytes {
+                        ctx.include_bytes(url.clone(), bytes);
+                        self.mail.images_ready.insert(url);
+                    }
+                }
+                Event::AttachmentSaved { .. } => self.mail.status = Status::AttachmentSaved,
                 Event::Error(e) => {
                     self.mail.signing_in = false;
                     self.mail.status = Status::Error(e);
@@ -212,7 +260,11 @@ impl MailCraftApp {
                 account_id,
                 id,
                 pick,
-            } => self.select(account_id, &id, pick),
+            } => {
+                // Each message opens in the simplified view first.
+                self.view.original = false;
+                self.select(account_id, &id, pick);
+            }
             Command::SelectAll => {
                 self.mail.selection = self
                     .mail
@@ -241,6 +293,38 @@ impl MailCraftApp {
                 }
             }
             Command::SearchChanged => self.dirty = true,
+            Command::OpenAttachment { index } | Command::SaveAttachment { index } => {
+                let open = matches!(command, Command::OpenAttachment { .. });
+                let (Some((account_id, message_id)), Some(a)) = (
+                    self.mail.message.clone(),
+                    self.mail.attachments.get(index).cloned(),
+                ) else {
+                    return None;
+                };
+                let name = attachments::safe_file_name(&a.name);
+                let path = if open {
+                    if attachments::is_risky(&a.name) {
+                        return None;
+                    }
+                    // Its own folder per message, so two "facture.pdf" never collide.
+                    let dir = craft_settings::paths::cache_dir("mailcraft").map(|d| {
+                        d.join("attachments")
+                            .join(format!("{:x}", hash(&message_id)))
+                    });
+                    dir.and_then(|d| std::fs::create_dir_all(&d).ok().map(|_| d.join(&name)))
+                } else {
+                    rfd::FileDialog::new().set_file_name(&name).save_file()
+                };
+                if let Some(path) = path {
+                    self.send(Request::SaveAttachment {
+                        account_id,
+                        message_id,
+                        attachment_id: a.id,
+                        path,
+                        open,
+                    });
+                }
+            }
             Command::SearchServer => {
                 if let Some((account_id, _)) = self.mail.folder.clone() {
                     self.mail.status = Status::SearchingServer;
@@ -542,10 +626,17 @@ fn open_backend(ctx: &Context, prefs: &Prefs) -> Result<Backend, String> {
             client_id,
             months: prefs.sync.months.max(1),
         },
-        Box::new(move || repaint.request_repaint()),
+        std::sync::Arc::new(move || repaint.request_repaint()),
     );
     Ok(Backend {
         store,
         worker: Some(worker),
     })
+}
+
+fn hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }

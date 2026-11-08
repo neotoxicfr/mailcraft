@@ -72,8 +72,9 @@ fn sample_store(dir: &std::path::Path) -> mailcraft_store::Store {
         &MessageBody {
             text: "Montant : 42 €".into(),
             to: "user@example.com".into(),
-            cc: String::new(),
+            ..MessageBody::default()
         },
+        &[],
     )
     .unwrap();
     s

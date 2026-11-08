@@ -537,7 +537,7 @@ fn long_date(ts: i64, lang: Lang) -> String {
 
 // ---- reading pane ----
 
-pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>) {
+pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, command: &mut Option<Command>) {
     let several = c.mail.selection.len();
     let Some(m) = c.mail.selected().filter(|_| several <= 1) else {
         let text = if several > 1 {
@@ -578,22 +578,106 @@ pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>) {
             }
         }
     }
-    ui.add_space(6.0);
-    ui.separator();
-    ScrollArea::vertical()
-        .auto_shrink(false)
-        .show(ui, |ui| match &c.mail.body {
-            Some(body) => {
-                ui.add(
-                    egui::Label::new(RichText::new(&body.text).size(14.0))
-                        .selectable(true)
-                        .wrap(),
-                );
-            }
-            None => {
-                ui.label(RichText::new(T::Loading.get(c.lang)).weak());
+    attachments(ui, c, command);
+    let has_html = !c.mail.original_html.is_empty();
+    if has_html {
+        ui.horizontal(|ui| {
+            let label = if view.original {
+                T::SimplifiedView
+            } else {
+                T::OriginalView
+            };
+            if ui.small_button(label.get(c.lang)).clicked() {
+                view.original = !view.original;
             }
         });
+    }
+    ui.add_space(4.0);
+    ui.separator();
+    if c.mail.body.is_none() {
+        ui.label(RichText::new(T::Loading.get(c.lang)).weak());
+        return;
+    }
+    if view.original && has_html {
+        // The WebView is a native window drawn over this rectangle by the app.
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, Sense::hover());
+        view.webview = Some(rect);
+        return;
+    }
+    if c.mail.blocks.is_empty() && has_html {
+        ui.label(
+            RichText::new(T::NothingSimplified.get(c.lang))
+                .weak()
+                .italics(),
+        );
+        if ui.button(T::OriginalView.get(c.lang)).clicked() {
+            view.original = true;
+        }
+        return;
+    }
+    let inline_uri = |cid: &str| {
+        c.mail
+            .inline
+            .contains_key(cid)
+            .then(|| format!("bytes://cid/{cid}"))
+    };
+    let images = crate::reader::Images {
+        block_remote: c.block_images,
+        ready: &c.mail.images_ready,
+        inline_uri: &inline_uri,
+    };
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        let wanted = crate::reader::show(ui, c, &c.mail.blocks, &images);
+        for url in wanted {
+            if !c.mail.images_requested.contains(&url) && !view.image_requests.contains(&url) {
+                view.image_requests.push(url);
+            }
+        }
+    });
+}
+
+fn attachments(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
+    let files: Vec<(usize, &mailcraft_store::Attachment)> = c
+        .mail
+        .attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| !a.is_inline)
+        .collect();
+    if files.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        for (index, a) in files {
+            let text = format!("{}  ({})", a.name, human_size(a.size));
+            let button = ui.add(egui::Button::new(text).small());
+            egui::Popup::menu(&button).show(|ui| {
+                let risky = crate::attachments::is_risky(&a.name);
+                let open = ui.add_enabled(!risky, egui::Button::new(T::Open.get(c.lang)));
+                let open = if risky {
+                    open.on_disabled_hover_text(T::RiskyFile.get(c.lang))
+                } else {
+                    open
+                };
+                if open.clicked() {
+                    *command = Some(Command::OpenAttachment { index });
+                }
+                if ui.button(T::SaveAs.get(c.lang)).clicked() {
+                    *command = Some(Command::SaveAttachment { index });
+                }
+            });
+        }
+    });
+}
+
+fn human_size(bytes: i64) -> String {
+    match bytes {
+        b if b >= 1 << 20 => format!("{:.1} Mo", b as f64 / f64::from(1 << 20)),
+        b if b >= 1 << 10 => format!("{} Ko", b >> 10),
+        b => format!("{b} o"),
+    }
 }
 
 // ---- status bar ----
@@ -619,6 +703,9 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
                     T::Syncing.get(lang),
                     T::MessagesWord.get(lang)
                 )));
+            }
+            Status::AttachmentSaved => {
+                ui.label(small(T::AttachmentSaved.get(lang).into()));
             }
             Status::SearchingServer => {
                 ui.label(small(T::SearchingServer.get(lang).into()));

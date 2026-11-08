@@ -13,3 +13,8 @@ workspace = true
 mailcraft-ui-egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
 log = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Original view of a message: Edge WebView2 as a child of the main window.
+wry = { workspace = true }
+open = { workspace = true }

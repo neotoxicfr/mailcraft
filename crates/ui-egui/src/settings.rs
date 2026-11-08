@@ -62,12 +62,15 @@ impl Default for Sync {
 pub struct Privacy {
     /// Encrypt the local copy of the mail (applies when it is created).
     pub encrypt_local_copy: bool,
+    /// Tracker blocker: remote images of messages are not loaded.
+    pub block_remote_images: bool,
 }
 
 impl Default for Privacy {
     fn default() -> Self {
         Self {
             encrypt_local_copy: true,
+            block_remote_images: false,
         }
     }
 }

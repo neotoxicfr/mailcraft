@@ -35,6 +35,12 @@ pub struct View {
     pub tab: Tab,
     pub search: String,
     pub dialog: Option<Dialog>,
+    /// Show the shown message in its original look (WebView) rather than simplified.
+    pub original: bool,
+    /// Where the original view goes this frame (set by the reading pane).
+    pub webview: Option<egui::Rect>,
+    /// Remote images the reader wants, to send to the worker.
+    pub image_requests: Vec<String>,
 }
 
 /// A question the window asks before acting.
@@ -89,6 +95,12 @@ pub enum Command {
     SearchChanged,
     /// Search the whole mailbox on the server for the current query.
     SearchServer,
+    OpenAttachment {
+        index: usize,
+    },
+    SaveAttachment {
+        index: usize,
+    },
     /// Selected messages to Deleted Items, or for good when `permanent` (already confirmed).
     Delete {
         permanent: bool,
@@ -122,12 +134,15 @@ pub struct Ctx<'a> {
     pub accent: Color32,
     pub mail: &'a Mail,
     pub save_error: Option<&'a str>,
+    /// Remote images stay blocked (tracker blocker on).
+    pub block_images: bool,
 }
 
 pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Option<Command> {
     let dark = ui.visuals().dark_mode;
     let mut command = None;
     let mut pane_command = None;
+    view.webview = None;
 
     Panel::top("tabs")
         .frame(
@@ -175,7 +190,7 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
         });
     CentralPanel::default()
         .frame(pane_frame(ui))
-        .show(ui, |ui| panes::reading_pane(ui, c));
+        .show(ui, |ui| panes::reading_pane(ui, c, view, &mut pane_command));
     let dialog_command = dialog(ui.ctx(), c, &mut view.dialog);
     let key_command = if view.dialog.is_none() {
         keys(ui.ctx(), c, &mut view.dialog)

@@ -1,6 +1,9 @@
 //! What the panes show, re-read from the local store whenever the sync worker changes it.
 
-use mailcraft_store::{Account, Folder, MessageBody, MessageSummary, ROLES, Store};
+use std::collections::{HashMap, HashSet};
+
+use base64::Engine;
+use mailcraft_store::{Account, Attachment, Folder, MessageBody, MessageSummary, ROLES, Store};
 
 /// Most recent messages listed per folder; older ones stay in the store.
 const LIST_LIMIT: usize = 5000;
@@ -16,6 +19,7 @@ pub enum Status {
     },
     UpToDate,
     SearchingServer,
+    AttachmentSaved,
     ServerFound(usize),
     /// Changes made locally wait for the network.
     Offline {
@@ -37,6 +41,18 @@ pub struct Mail {
     pub selection: Vec<(i64, String)>,
     pub anchor: Option<(i64, String)>,
     pub body: Option<MessageBody>,
+    /// The shown body as blocks for the simplified reader.
+    pub blocks: Vec<mailcraft_html::Block>,
+    pub attachments: Vec<Attachment>,
+    /// Inline images of the shown message: content id → bytes.
+    pub inline: HashMap<String, Vec<u8>>,
+    inline_requested: bool,
+    /// The message's HTML prepared for the original view (inline images embedded, CSP added).
+    pub original_html: String,
+    body_key: Option<(i64, String)>,
+    /// Remote images: asked for, loaded (bytes given to egui), or failed.
+    pub images_requested: HashSet<String>,
+    pub images_ready: HashSet<String>,
     pub status: Status,
     pub signing_in: bool,
     /// The list shows search results (all folders) rather than one folder.
@@ -91,7 +107,47 @@ impl Mail {
             Some((a, id)) => store.body(*a, id)?,
             None => None,
         };
+        // Parse once per message (or when its body arrives), not every frame.
+        let key = self.message.clone().filter(|_| self.body.is_some());
+        if key != self.body_key {
+            self.body_key = key;
+            self.inline.clear();
+            self.inline_requested = false;
+            match (&self.message, &self.body) {
+                (Some((a, id)), Some(b)) => {
+                    self.blocks = if b.html.is_empty() {
+                        mailcraft_html::from_text(&b.text)
+                    } else {
+                        mailcraft_html::parse(&b.html)
+                    };
+                    self.attachments = store.attachments(*a, id)?;
+                    self.original_html = original_html(&b.html, &self.inline);
+                }
+                _ => {
+                    self.blocks.clear();
+                    self.attachments.clear();
+                    self.original_html.clear();
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Inline images arrived for the message shown.
+    pub fn set_inline(&mut self, images: Vec<(String, Vec<u8>)>) {
+        self.inline = images.into_iter().collect();
+        if let Some(b) = &self.body {
+            self.original_html = original_html(&b.html, &self.inline);
+        }
+    }
+
+    /// The shown message has inline images not requested yet.
+    pub fn wants_inline(&mut self) -> Option<(i64, String)> {
+        if self.inline_requested || !self.attachments.iter().any(|a| a.is_inline) {
+            return None;
+        }
+        self.inline_requested = true;
+        self.body_key.clone()
     }
 
     pub fn is_selected(&self, account_id: i64, id: &str) -> bool {
@@ -169,5 +225,85 @@ fn tree<'a>(
     for f in level {
         out.push((f, depth));
         tree(all, account, Some(&f.id), depth + 1, out);
+    }
+}
+
+/// The original HTML for the WebView: `cid:` images replaced by their bytes, scripts and
+/// plug-ins forbidden by a Content-Security-Policy (JavaScript is also off in the view).
+pub fn original_html(html: &str, inline: &HashMap<String, Vec<u8>>) -> String {
+    if html.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(html.len() + 256);
+    out.push_str(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; object-src 'none'; \
+         frame-src 'none'; form-action 'none'; base-uri 'none'\">",
+    );
+    let mut rest = html;
+    while let Some(at) = rest.find("cid:") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 4..];
+        let end = after
+            .find(['"', '\'', ' ', '>', ')'])
+            .unwrap_or(after.len());
+        let cid = &after[..end];
+        match inline.get(cid) {
+            Some(bytes) => {
+                out.push_str("data:");
+                out.push_str(image_mime(bytes));
+                out.push_str(";base64,");
+                out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes));
+            }
+            None => {
+                out.push_str("cid:");
+                out.push_str(cid);
+            }
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn image_mime(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, ..] => "image/jpeg",
+        [b'G', b'I', b'F', ..] => "image/gif",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "image/webp",
+        [b'B', b'M', ..] => "image/bmp",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::original_html;
+    use std::collections::HashMap;
+
+    #[test]
+    fn cid_images_are_embedded_and_scripts_forbidden() {
+        let inline = HashMap::from([("logo@x".to_string(), vec![0x89, b'P', b'N', b'G', 1])]);
+        let out = original_html("<img src=\"cid:logo@x\"><img src='cid:missing'>", &inline);
+        assert!(out.starts_with(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'"
+        ));
+        assert!(out.contains("src=\"data:image/png;base64,iVBORwE=\""));
+        assert!(out.contains("src='cid:missing'"));
+        assert!(original_html("", &inline).is_empty());
     }
 }

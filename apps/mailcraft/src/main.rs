@@ -1,20 +1,37 @@
 // No console window behind the app in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod webview;
+
 use eframe::egui;
 use mailcraft_ui_egui::{Command, MailCraftApp};
 
-struct App(MailCraftApp);
+struct App {
+    ui: MailCraftApp,
+    #[cfg(windows)]
+    original: webview::OriginalView,
+}
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.0.ui(ui) == Some(Command::Exit) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.ui.ui(ui) == Some(Command::Exit) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        #[cfg(windows)]
+        {
+            self.original
+                .update(frame, ui.ctx().pixels_per_point(), self.ui.original_view());
+            if self.original.failed() {
+                self.ui.original_unavailable();
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
     }
 
     fn on_exit(&mut self) {
-        self.0.flush();
+        self.ui.flush();
     }
 }
 
@@ -29,6 +46,22 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "MailCraft",
         options,
-        Box::new(|cc| Ok(Box::new(App(MailCraftApp::new(&cc.egui_ctx))))),
+        Box::new(|cc| {
+            Ok(Box::new(App {
+                ui: MailCraftApp::new(&cc.egui_ctx),
+                // The WebView keeps its profile (cache, cookies of images) apart from Edge's.
+                #[cfg(windows)]
+                original: webview::OriginalView::new(dirs_webview()),
+            }))
+        }),
     )
+}
+
+#[cfg(windows)]
+fn dirs_webview() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| {
+        std::path::PathBuf::from(d)
+            .join("mailcraft")
+            .join("webview")
+    })
 }

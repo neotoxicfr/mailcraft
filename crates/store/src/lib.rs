@@ -94,9 +94,22 @@ pub struct MessageSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MessageBody {
+    /// Plain text (search, quoting, and the reader for text mail).
     pub text: String,
+    /// The original HTML, empty for a text mail.
+    pub html: String,
     pub to: String,
     pub cc: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub content_type: String,
+    pub size: i64,
+    /// Shown inside the body (`cid:` image) rather than as a file.
+    pub is_inline: bool,
 }
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -239,6 +252,27 @@ impl Store {
                     WHERE rowid = (SELECT rowid FROM messages WHERE account_id = new.account_id AND id = new.id);
                 END;
                 PRAGMA user_version = 3;
+                COMMIT;",
+            )?;
+        }
+        if version < 4 {
+            // Bodies now keep the HTML; the text-only ones cached before are fetched again.
+            self.conn.execute_batch(
+                "BEGIN;
+                DELETE FROM bodies;
+                ALTER TABLE bodies ADD COLUMN html TEXT NOT NULL DEFAULT '';
+                CREATE TABLE attachments (
+                    account_id INTEGER NOT NULL,
+                    message_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    is_inline INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, message_id, id),
+                    FOREIGN KEY (account_id, message_id) REFERENCES messages(account_id, id) ON DELETE CASCADE
+                );
+                PRAGMA user_version = 4;
                 COMMIT;",
             )?;
         }
@@ -604,25 +638,64 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT text, to_list, cc_list FROM bodies WHERE account_id = ?1 AND id = ?2",
+                "SELECT text, html, to_list, cc_list FROM bodies WHERE account_id = ?1 AND id = ?2",
                 params![account_id, id],
                 |r| {
                     Ok(MessageBody {
                         text: r.get(0)?,
-                        to: r.get(1)?,
-                        cc: r.get(2)?,
+                        html: r.get(1)?,
+                        to: r.get(2)?,
+                        cc: r.get(3)?,
                     })
                 },
             )
             .optional()?)
     }
 
-    pub fn put_body(&self, account_id: i64, id: &str, body: &MessageBody) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO bodies (account_id, id, text, to_list, cc_list) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![account_id, id, body.text, body.to, body.cc],
+    /// Stores the body and replaces the message's attachment list.
+    pub fn put_body(
+        &mut self,
+        account_id: i64,
+        id: &str,
+        body: &MessageBody,
+        attachments: &[Attachment],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO bodies (account_id, id, text, html, to_list, cc_list)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![account_id, id, body.text, body.html, body.to, body.cc],
         )?;
+        tx.execute(
+            "DELETE FROM attachments WHERE account_id = ?1 AND message_id = ?2",
+            params![account_id, id],
+        )?;
+        for a in attachments {
+            tx.execute(
+                "INSERT INTO attachments (account_id, message_id, id, name, content_type, size, is_inline)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![account_id, id, a.id, a.name, a.content_type, a.size, a.is_inline],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn attachments(&self, account_id: i64, message_id: &str) -> Result<Vec<Attachment>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, name, content_type, size, is_inline FROM attachments
+             WHERE account_id = ?1 AND message_id = ?2 ORDER BY rowid",
+        )?;
+        let rows = st.query_map(params![account_id, message_id], |r| {
+            Ok(Attachment {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                content_type: r.get(2)?,
+                size: r.get(3)?,
+                is_inline: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 

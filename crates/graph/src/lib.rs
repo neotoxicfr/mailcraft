@@ -83,9 +83,29 @@ pub struct DeltaPage {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RemoteBody {
-    pub text: String,
+    /// HTML when `is_html`, plain text otherwise.
+    pub content: String,
+    pub is_html: bool,
     pub to: String,
     pub cc: String,
+    pub attachments: Vec<RemoteAttachment>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct RemoteAttachment {
+    pub id: String,
+    pub name: String,
+    pub content_type: String,
+    pub size: i64,
+    pub is_inline: bool,
+}
+
+/// An inline attachment's content, to show `cid:` images.
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct InlineContent {
+    pub content_id: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 pub struct Graph<'a> {
@@ -222,18 +242,76 @@ impl<'a> Graph<'a> {
     }
 
     /// Body as plain text (Microsoft converts HTML), with recipients.
+    /// Body as sent (HTML or text), recipients and the list of attachments (without content).
     pub fn body(&self, id: &str) -> Result<RemoteBody> {
-        let url = format!("{GRAPH}/me/messages/{id}?$select=body,toRecipients,ccRecipients");
-        let v = self.send(|| {
-            self.http.get(&url).header(
-                "Prefer",
-                "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"",
-            )
-        })?;
+        let url = format!(
+            "{GRAPH}/me/messages/{id}?$select=body,toRecipients,ccRecipients\
+             &$expand=attachments($select=id,name,contentType,size,isInline)"
+        );
+        let v = self.get(&url)?;
+        let attachments = v["attachments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| RemoteAttachment {
+                id: a["id"].as_str().unwrap_or("").to_owned(),
+                name: a["name"].as_str().unwrap_or("").to_owned(),
+                content_type: a["contentType"].as_str().unwrap_or("").to_owned(),
+                size: a["size"].as_i64().unwrap_or(0),
+                is_inline: a["isInline"].as_bool().unwrap_or(false),
+            })
+            .collect();
         Ok(RemoteBody {
-            text: v["body"]["content"].as_str().unwrap_or("").to_owned(),
+            content: v["body"]["content"].as_str().unwrap_or("").to_owned(),
+            is_html: v["body"]["contentType"].as_str() == Some("html"),
             to: recipients(&v["toRecipients"]),
             cc: recipients(&v["ccRecipients"]),
+            attachments,
+        })
+    }
+
+    /// Raw content of a file attachment, for saving or opening it.
+    pub fn attachment_bytes(&self, message_id: &str, attachment_id: &str) -> Result<Vec<u8>> {
+        let url = format!("{GRAPH}/me/messages/{message_id}/attachments/{attachment_id}/$value");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.token)
+            .header("Prefer", "IdType=\"ImmutableId\"")
+            .timeout(Duration::from_secs(600))
+            .send()
+            .map_err(|e| GraphError::Network(e.to_string()))?;
+        match resp.status() {
+            s if s.is_success() => Ok(resp
+                .bytes()
+                .map_err(|e| GraphError::Network(e.to_string()))?
+                .to_vec()),
+            StatusCode::UNAUTHORIZED => Err(GraphError::Unauthorized),
+            StatusCode::NOT_FOUND => Err(GraphError::NotFound),
+            s => Err(GraphError::Api(
+                s.as_u16(),
+                "attachment download refused".into(),
+            )),
+        }
+    }
+
+    /// One attachment with its content (base64 in Graph's answer). For `cid:` images and files.
+    pub fn attachment(&self, message_id: &str, attachment_id: &str) -> Result<InlineContent> {
+        use base64::Engine;
+        let v = self.get(&format!(
+            "{GRAPH}/me/messages/{message_id}/attachments/{attachment_id}"
+        ))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(v["contentBytes"].as_str().unwrap_or(""))
+            .map_err(|e| GraphError::Api(200, format!("attachment content: {e}")))?;
+        Ok(InlineContent {
+            content_id: v["contentId"]
+                .as_str()
+                .unwrap_or("")
+                .trim_matches(['<', '>'])
+                .to_owned(),
+            content_type: v["contentType"].as_str().unwrap_or("").to_owned(),
+            bytes,
         })
     }
 
