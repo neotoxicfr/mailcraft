@@ -20,6 +20,13 @@ use crate::i18n::Lang;
 use crate::mail::{Mail, Status};
 use crate::settings::{Appearance, Prefs};
 pub use crate::shell::Command;
+use crate::shell::{Dialog, Pick};
+
+/// A move Ctrl+Z can put back: (message id, folder it came from).
+struct Undo {
+    account_id: i64,
+    moves: Vec<(String, String)>,
+}
 
 struct Backend {
     store: Store,
@@ -35,6 +42,8 @@ pub struct MailCraftApp {
     mail: Mail,
     backend: Option<Backend>,
     dirty: bool,
+    /// Moves that Ctrl+Z puts back, newest last.
+    undo: Vec<Undo>,
 }
 
 impl MailCraftApp {
@@ -66,6 +75,7 @@ impl MailCraftApp {
             mail: Mail::default(),
             backend: None,
             dirty: false,
+            undo: Vec::new(),
         }
     }
 
@@ -155,6 +165,7 @@ impl MailCraftApp {
                     self.dirty = true;
                 }
                 Event::Changed | Event::BodyReady { .. } => self.dirty = true,
+                Event::Offline { pending, .. } => self.mail.status = Status::Offline { pending },
                 Event::Error(e) => {
                     self.mail.signing_in = false;
                     self.mail.status = Status::Error(e);
@@ -165,17 +176,12 @@ impl MailCraftApp {
 
     /// Handles what the window can; returns what the host must do (exit).
     fn run(&mut self, command: Command) -> Option<Command> {
-        let send = |app: &Self, r: Request| {
-            if let Some(w) = app.worker() {
-                w.send(r);
-            }
-        };
         match command {
             Command::Exit => return Some(Command::Exit),
             Command::AddAccount => {
                 self.mail.signing_in = true;
                 self.mail.status = Status::SigningIn;
-                send(self, Request::AddMicrosoftAccount);
+                self.send(Request::AddMicrosoftAccount);
             }
             Command::CancelSignIn => {
                 if let Some(w) = self.worker() {
@@ -186,7 +192,7 @@ impl MailCraftApp {
                 if !matches!(self.mail.status, Status::Syncing { .. }) {
                     self.mail.status = Status::Ready;
                 }
-                send(self, Request::SyncAll);
+                self.send(Request::SyncAll);
             }
             Command::SelectFolder {
                 account_id,
@@ -194,30 +200,290 @@ impl MailCraftApp {
             } => {
                 self.mail.folder = Some((account_id, folder_id));
                 self.mail.message = None;
+                self.mail.selection.clear();
+                self.mail.anchor = None;
                 self.dirty = true;
             }
-            Command::SelectMessage { account_id, id } => {
+            Command::SelectMessage {
+                account_id,
+                id,
+                pick,
+            } => self.select(account_id, &id, pick),
+            Command::SelectAll => {
+                self.mail.selection = self
+                    .mail
+                    .messages
+                    .iter()
+                    .map(|m| (m.account_id, m.id.clone()))
+                    .collect();
+                self.mail.message = None;
+            }
+            Command::Step(delta) => {
+                let at = self.mail.message.as_ref().and_then(|(a, id)| {
+                    self.mail
+                        .messages
+                        .iter()
+                        .position(|m| m.account_id == *a && &m.id == id)
+                });
+                let next = match at {
+                    Some(i) => i
+                        .saturating_add_signed(delta as isize)
+                        .min(self.mail.messages.len().saturating_sub(1)),
+                    None => 0,
+                };
+                if let Some(m) = self.mail.messages.get(next) {
+                    let (a, id) = (m.account_id, m.id.clone());
+                    self.select(a, &id, Pick::Only);
+                }
+            }
+            Command::SearchChanged => self.dirty = true,
+            Command::Delete { permanent } => {
+                let in_trash = self.mail.current_folder().and_then(|f| f.role.as_deref())
+                    == Some("deleteditems");
+                if permanent {
+                    if let Some((account_id, ids)) = self.take_selection() {
+                        self.act(Request::Delete { account_id, ids });
+                    }
+                } else if in_trash {
+                    self.view.dialog = Some(Dialog::ConfirmPermanentDelete {
+                        count: self.mail.selection.len(),
+                    });
+                } else {
+                    self.move_selection_to_role("deleteditems");
+                }
+            }
+            Command::Archive => self.move_selection_to_role("archive"),
+            Command::MoveTo { folder_id } => self.move_selection(&folder_id),
+            Command::ToggleRead => {
+                let selected = self.mail.selected_messages();
+                let read = selected.iter().any(|m| !m.is_read);
+                let account_id = selected.first().map(|m| m.account_id)?;
+                let ids = selected.iter().map(|m| m.id.clone()).collect();
+                self.act(Request::SetRead {
+                    account_id,
+                    ids,
+                    read,
+                });
+            }
+            Command::ToggleFlag => {
+                let selected = self.mail.selected_messages();
+                let flagged = selected.iter().any(|m| !m.flagged);
+                let account_id = selected.first().map(|m| m.account_id)?;
+                let ids = selected.iter().map(|m| m.id.clone()).collect();
+                self.act(Request::SetFlag {
+                    account_id,
+                    ids,
+                    flagged,
+                });
+            }
+            Command::Undo => {
+                if let Some(undo) = self.undo.pop() {
+                    // Grouped by the folder each message came from.
+                    let mut back: Vec<(String, Vec<String>)> = Vec::new();
+                    for (id, from) in undo.moves {
+                        match back.iter_mut().find(|(f, _)| *f == from) {
+                            Some((_, ids)) => ids.push(id),
+                            None => back.push((from, vec![id])),
+                        }
+                    }
+                    for (dest, ids) in back {
+                        self.act(Request::Move {
+                            account_id: undo.account_id,
+                            ids,
+                            dest,
+                        });
+                    }
+                }
+            }
+            Command::CreateFolder {
+                account_id,
+                parent,
+                name,
+            } => {
+                self.send(Request::CreateFolder {
+                    account_id,
+                    parent,
+                    name,
+                });
+            }
+            Command::RenameFolder {
+                account_id,
+                id,
+                name,
+            } => {
+                self.send(Request::RenameFolder {
+                    account_id,
+                    id,
+                    name,
+                });
+            }
+            Command::DeleteFolder { account_id, id } => {
+                self.send(Request::DeleteFolder { account_id, id });
+            }
+        }
+        None
+    }
+
+    fn send(&self, request: Request) {
+        if let Some(w) = self.worker() {
+            w.send(request);
+        }
+    }
+
+    /// A mailbox change: through the worker (local first, then the server), or straight into
+    /// the store when there is no worker (tests).
+    fn act(&mut self, request: Request) {
+        if self.worker().is_some() {
+            self.send(request);
+            return;
+        }
+        let Some(b) = self.backend.as_mut() else {
+            return;
+        };
+        let store = &mut b.store;
+        let result = match &request {
+            Request::Move {
+                account_id,
+                ids,
+                dest,
+            } => store.move_local(*account_id, ids, dest).map(|_| ()),
+            Request::Delete { account_id, ids } => store.delete_local(*account_id, ids),
+            Request::SetRead {
+                account_id,
+                ids,
+                read,
+            } => ids
+                .iter()
+                .try_for_each(|id| store.set_read(*account_id, id, *read)),
+            Request::SetFlag {
+                account_id,
+                ids,
+                flagged,
+            } => ids
+                .iter()
+                .try_for_each(|id| store.set_flag(*account_id, id, *flagged)),
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            self.mail.status = Status::Error(e.to_string());
+        }
+        self.dirty = true;
+    }
+
+    fn select(&mut self, account_id: i64, id: &str, pick: Pick) {
+        let key = (account_id, id.to_owned());
+        match pick {
+            Pick::Only => {
+                self.mail.selection = vec![key.clone()];
+                self.mail.anchor = Some(key.clone());
+                self.mail.message = Some(key);
                 let unread = self
                     .mail
                     .messages
                     .iter()
                     .any(|m| m.account_id == account_id && m.id == id && !m.is_read);
-                self.mail.message = Some((account_id, id.clone()));
-                self.dirty = true;
-                send(
-                    self,
-                    Request::FetchBody {
-                        account_id,
-                        id: id.clone(),
-                    },
-                );
+                self.send(Request::FetchBody {
+                    account_id,
+                    id: id.to_owned(),
+                });
                 if unread {
-                    send(self, Request::MarkRead { account_id, id });
+                    self.act(Request::SetRead {
+                        account_id,
+                        ids: vec![id.to_owned()],
+                        read: true,
+                    });
                 }
             }
-            Command::SearchChanged => self.dirty = true,
+            Pick::Toggle => {
+                if let Some(i) = self.mail.selection.iter().position(|k| *k == key) {
+                    self.mail.selection.remove(i);
+                } else {
+                    self.mail.selection.push(key.clone());
+                }
+                self.mail.anchor = Some(key);
+                self.mail.message = self
+                    .mail
+                    .selection
+                    .first()
+                    .cloned()
+                    .filter(|_| self.mail.selection.len() == 1);
+            }
+            Pick::Range => {
+                let pos = |k: &(i64, String)| {
+                    self.mail
+                        .messages
+                        .iter()
+                        .position(|m| m.account_id == k.0 && m.id == k.1)
+                };
+                let to = pos(&key);
+                let from = self.mail.anchor.as_ref().and_then(pos).or(to);
+                if let (Some(a), Some(b)) = (from, to) {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    self.mail.selection = self.mail.messages[lo..=hi]
+                        .iter()
+                        .map(|m| (m.account_id, m.id.clone()))
+                        .collect();
+                }
+                self.mail.message = None;
+            }
         }
-        None
+        self.dirty = true;
+    }
+
+    /// Takes the selection for an action that removes it from the list, and selects the next
+    /// message below it, as Outlook does.
+    fn take_selection(&mut self) -> Option<(i64, Vec<String>)> {
+        let selected = self.mail.selected_messages();
+        let account_id = selected.first()?.account_id;
+        let ids: Vec<String> = selected.iter().map(|m| m.id.clone()).collect();
+        let last = self.mail.messages.iter().rposition(|m| ids.contains(&m.id));
+        let next = last.and_then(|i| {
+            self.mail.messages[i + 1..]
+                .iter()
+                .find(|m| !ids.contains(&m.id))
+        });
+        let next = next.map(|m| (m.account_id, m.id.clone()));
+        self.mail.selection = next.iter().cloned().collect();
+        self.mail.anchor = next.clone();
+        self.mail.message = next;
+        Some((account_id, ids))
+    }
+
+    fn move_selection_to_role(&mut self, role: &str) {
+        let Some((account_id, _)) = self.mail.folder.clone() else {
+            return;
+        };
+        if let Some(dest) = self
+            .mail
+            .folder_with_role(account_id, role)
+            .map(|f| f.id.clone())
+        {
+            self.move_selection(&dest);
+        }
+    }
+
+    fn move_selection(&mut self, dest: &str) {
+        let Some(from) = self.mail.folder.as_ref().map(|(_, f)| f.clone()) else {
+            return;
+        };
+        if from == dest {
+            return;
+        }
+        let Some((account_id, ids)) = self.take_selection() else {
+            return;
+        };
+        self.undo.push(Undo {
+            account_id,
+            moves: ids.iter().map(|id| (id.clone(), from.clone())).collect(),
+        });
+        if self.undo.len() > 50 {
+            self.undo.remove(0);
+        }
+        self.act(Request::Move {
+            account_id,
+            ids,
+            dest: dest.to_owned(),
+        });
     }
 
     pub fn prefs(&self) -> &Prefs {

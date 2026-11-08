@@ -237,15 +237,107 @@ impl<'a> Graph<'a> {
         })
     }
 
-    pub fn set_read(&self, id: &str, read: bool) -> Result<()> {
-        let url = format!("{GRAPH}/me/messages/{id}");
+    /// Runs a change on the mailbox. For `CreateFolder`, returns the new folder's JSON.
+    pub fn apply(&self, op: &Op<'_>) -> Result<Value> {
+        let (method, url, body) = op.request();
         self.send(|| {
-            self.http
-                .patch(&url)
-                .header("Prefer", "IdType=\"ImmutableId\"")
-                .json(&serde_json::json!({ "isRead": read }))
+            let req = self
+                .http
+                .request(method.clone(), &url)
+                .header("Prefer", "IdType=\"ImmutableId\"");
+            match &body {
+                Some(b) => req.json(b),
+                None => req,
+            }
         })
-        .map(|_| ())
+    }
+
+    /// Creates a folder under `parent` (top level when `None`).
+    pub fn create_folder(&self, parent: Option<&str>, name: &str) -> Result<RemoteFolder> {
+        let v = self.apply(&Op::CreateFolder { parent, name })?;
+        Ok(RemoteFolder {
+            id: v["id"].as_str().unwrap_or("").to_owned(),
+            parent_id: parent.map(str::to_owned),
+            name: v["displayName"].as_str().unwrap_or(name).to_owned(),
+            unread: 0,
+            total: 0,
+        })
+    }
+}
+
+/// A change to the mailbox. Message ids are immutable ids; `dest` may be a folder id or a
+/// well-known name (`deleteditems`, `archive`…).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Op<'a> {
+    Move {
+        id: &'a str,
+        dest: &'a str,
+    },
+    /// Permanent: the message leaves the mailbox (recoverable only by an administrator tool).
+    Delete {
+        id: &'a str,
+    },
+    SetRead {
+        id: &'a str,
+        read: bool,
+    },
+    SetFlag {
+        id: &'a str,
+        flagged: bool,
+    },
+    CreateFolder {
+        parent: Option<&'a str>,
+        name: &'a str,
+    },
+    RenameFolder {
+        id: &'a str,
+        name: &'a str,
+    },
+    DeleteFolder {
+        id: &'a str,
+    },
+}
+
+impl Op<'_> {
+    pub fn request(&self) -> (reqwest::Method, String, Option<Value>) {
+        use reqwest::Method;
+        use serde_json::json;
+        match *self {
+            Op::Move { id, dest } => (
+                Method::POST,
+                format!("{GRAPH}/me/messages/{id}/move"),
+                Some(json!({ "destinationId": dest })),
+            ),
+            Op::Delete { id } => (Method::DELETE, format!("{GRAPH}/me/messages/{id}"), None),
+            Op::SetRead { id, read } => (
+                Method::PATCH,
+                format!("{GRAPH}/me/messages/{id}"),
+                Some(json!({ "isRead": read })),
+            ),
+            Op::SetFlag { id, flagged } => (
+                Method::PATCH,
+                format!("{GRAPH}/me/messages/{id}"),
+                Some(
+                    json!({ "flag": { "flagStatus": if flagged { "flagged" } else { "notFlagged" } } }),
+                ),
+            ),
+            Op::CreateFolder { parent, name } => (
+                Method::POST,
+                match parent {
+                    Some(p) => format!("{GRAPH}/me/mailFolders/{p}/childFolders"),
+                    None => format!("{GRAPH}/me/mailFolders"),
+                },
+                Some(json!({ "displayName": name })),
+            ),
+            Op::RenameFolder { id, name } => (
+                Method::PATCH,
+                format!("{GRAPH}/me/mailFolders/{id}"),
+                Some(json!({ "displayName": name })),
+            ),
+            Op::DeleteFolder { id } => {
+                (Method::DELETE, format!("{GRAPH}/me/mailFolders/{id}"), None)
+            }
+        }
     }
 }
 
@@ -330,6 +422,47 @@ mod tests {
             (m.from_addr.as_str(), m.received, m.is_read, m.flagged),
             ("billing@example.com", 1_794_130_200, false, true)
         );
+    }
+
+    #[test]
+    fn change_requests() {
+        use super::Op;
+        use reqwest::Method;
+        let (m, url, body) = Op::Move {
+            id: "M1",
+            dest: "deleteditems",
+        }
+        .request();
+        assert_eq!(
+            (m, url.as_str()),
+            (
+                Method::POST,
+                "https://graph.microsoft.com/v1.0/me/messages/M1/move"
+            )
+        );
+        assert_eq!(body.unwrap()["destinationId"], "deleteditems");
+        let (m, _, body) = Op::SetFlag {
+            id: "M1",
+            flagged: false,
+        }
+        .request();
+        assert_eq!(
+            (m, body.unwrap()["flag"]["flagStatus"].as_str()),
+            (Method::PATCH, Some("notFlagged"))
+        );
+        let (_, url, _) = Op::CreateFolder {
+            parent: Some("P"),
+            name: "Factures",
+        }
+        .request();
+        assert!(url.ends_with("/me/mailFolders/P/childFolders"));
+        let (_, url, _) = Op::CreateFolder {
+            parent: None,
+            name: "Factures",
+        }
+        .request();
+        assert!(url.ends_with("/me/mailFolders"));
+        assert_eq!(Op::Delete { id: "M1" }.request().0, Method::DELETE);
     }
 
     #[test]

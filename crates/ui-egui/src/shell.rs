@@ -34,6 +34,37 @@ const TABS: [(Tab, T); 5] = [
 pub struct View {
     pub tab: Tab,
     pub search: String,
+    pub dialog: Option<Dialog>,
+}
+
+/// A question the window asks before acting.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Dialog {
+    /// Permanent deletion of the selected messages.
+    ConfirmPermanentDelete { count: usize },
+    /// New folder under `parent` (top level when `None`), or rename of `rename`.
+    FolderName {
+        account_id: i64,
+        parent: Option<String>,
+        rename: Option<String>,
+        name: String,
+    },
+    ConfirmDeleteFolder {
+        account_id: i64,
+        id: String,
+        name: String,
+    },
+}
+
+/// How a click changes the message selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pick {
+    /// Plain click: only this one.
+    Only,
+    /// Ctrl+click: add or remove.
+    Toggle,
+    /// Shift+click: everything from the anchor.
+    Range,
 }
 
 /// What the window asks the app to do.
@@ -43,9 +74,44 @@ pub enum Command {
     AddAccount,
     CancelSignIn,
     SyncAll,
-    SelectFolder { account_id: i64, folder_id: String },
-    SelectMessage { account_id: i64, id: String },
+    SelectFolder {
+        account_id: i64,
+        folder_id: String,
+    },
+    SelectMessage {
+        account_id: i64,
+        id: String,
+        pick: Pick,
+    },
+    SelectAll,
+    /// Moves the selection up (-1) or down (+1).
+    Step(i32),
     SearchChanged,
+    /// Selected messages to Deleted Items, or for good when `permanent` (already confirmed).
+    Delete {
+        permanent: bool,
+    },
+    Archive,
+    MoveTo {
+        folder_id: String,
+    },
+    ToggleRead,
+    ToggleFlag,
+    Undo,
+    CreateFolder {
+        account_id: i64,
+        parent: Option<String>,
+        name: String,
+    },
+    RenameFolder {
+        account_id: i64,
+        id: String,
+        name: String,
+    },
+    DeleteFolder {
+        account_id: i64,
+        id: String,
+    },
 }
 
 /// Everything a frame needs besides the mutable state.
@@ -78,7 +144,7 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
         .show(ui, |ui| {
             // Full-height row (unlike `horizontal`), so group captions sit at the ribbon's bottom.
             ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                command = ribbon(ui, c, view.tab, prefs);
+                command = ribbon(ui, c, view, prefs);
             });
         });
     separator_line(ui, dark);
@@ -94,7 +160,9 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
         .default_size(240.0)
         .size_range(160.0..=420.0)
         .frame(pane_frame(ui))
-        .show(ui, |ui| panes::folder_pane(ui, c, &mut pane_command));
+        .show(ui, |ui| {
+            panes::folder_pane(ui, c, &mut view.dialog, &mut pane_command)
+        });
     Panel::left("list")
         .resizable(true)
         .default_size(400.0)
@@ -106,7 +174,164 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
     CentralPanel::default()
         .frame(pane_frame(ui))
         .show(ui, |ui| panes::reading_pane(ui, c));
-    command.or(pane_command)
+    let dialog_command = dialog(ui.ctx(), c, &mut view.dialog);
+    let key_command = if view.dialog.is_none() {
+        keys(ui.ctx(), c, &mut view.dialog)
+    } else {
+        None
+    };
+    command.or(pane_command).or(dialog_command).or(key_command)
+}
+
+/// Whether Delete on the selection should be permanent (asked first): Shift held, or the
+/// messages already sit in Deleted Items, as in Outlook.
+pub fn delete_is_permanent(c: &Ctx<'_>, shift: bool) -> bool {
+    shift || c.mail.current_folder().and_then(|f| f.role.as_deref()) == Some("deleteditems")
+}
+
+/// Delete pressed or clicked: a command, or a confirmation to show first.
+pub fn delete_request(c: &Ctx<'_>, shift: bool, dialog: &mut Option<Dialog>) -> Option<Command> {
+    let count = c.mail.selection.len();
+    if count == 0 {
+        return None;
+    }
+    if delete_is_permanent(c, shift) {
+        *dialog = Some(Dialog::ConfirmPermanentDelete { count });
+        None
+    } else {
+        Some(Command::Delete { permanent: false })
+    }
+}
+
+/// Outlook's shortcuts, when no text field has the keyboard.
+fn keys(ctx: &egui::Context, c: &Ctx<'_>, dialog: &mut Option<Dialog>) -> Option<Command> {
+    use egui::{Key, Modifiers};
+    if ctx.egui_wants_keyboard_input() {
+        return None;
+    }
+    ctx.input_mut(|i| {
+        if i.consume_key(Modifiers::SHIFT, Key::Delete) {
+            delete_request(c, true, dialog)
+        } else if i.consume_key(Modifiers::NONE, Key::Delete) {
+            delete_request(c, false, dialog)
+        } else if i.consume_key(Modifiers::COMMAND, Key::Z) {
+            Some(Command::Undo)
+        } else if i.consume_key(Modifiers::COMMAND, Key::A) {
+            Some(Command::SelectAll)
+        } else if i.consume_key(Modifiers::COMMAND, Key::Q)
+            || i.consume_key(Modifiers::COMMAND, Key::U)
+        {
+            Some(Command::ToggleRead)
+        } else if i.consume_key(Modifiers::NONE, Key::Insert) {
+            Some(Command::ToggleFlag)
+        } else if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+            Some(Command::Step(1))
+        } else if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+            Some(Command::Step(-1))
+        } else {
+            None
+        }
+    })
+}
+
+fn dialog(ctx: &egui::Context, c: &Ctx<'_>, state: &mut Option<Dialog>) -> Option<Command> {
+    let lang = c.lang;
+    let current = state.clone()?;
+    let mut result = None;
+    let mut close = false;
+    let modal = egui::Modal::new(egui::Id::unique("mailcraft_dialog")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        match &current {
+            Dialog::ConfirmPermanentDelete { count } => {
+                ui.heading(T::ConfirmPermanentTitle.get(lang));
+                ui.label(format!("{count} — {}", T::ConfirmPermanentBody.get(lang)));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::DeleteForGood.get(lang)).clicked() {
+                        result = Some(Command::Delete { permanent: true });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
+            Dialog::FolderName {
+                account_id,
+                parent,
+                rename,
+                name,
+            } => {
+                let title = if rename.is_some() {
+                    T::RenameFolder
+                } else {
+                    T::NewFolder
+                };
+                ui.heading(title.get(lang).replace('\n', " "));
+                let mut text = name.clone();
+                let edit = ui
+                    .add(egui::TextEdit::singleline(&mut text).hint_text(T::FolderName.get(lang)));
+                edit.request_focus();
+                let typed = text.trim().to_owned();
+                if let Some(Dialog::FolderName { name, .. }) = state.as_mut() {
+                    *name = text;
+                }
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let ok = ui
+                        .add_enabled(!typed.is_empty(), egui::Button::new(T::Ok.get(lang)))
+                        .clicked();
+                    if (ok || enter) && !typed.is_empty() {
+                        result = Some(match rename {
+                            Some(id) => Command::RenameFolder {
+                                account_id: *account_id,
+                                id: id.clone(),
+                                name: typed.clone(),
+                            },
+                            None => Command::CreateFolder {
+                                account_id: *account_id,
+                                parent: parent.clone(),
+                                name: typed.clone(),
+                            },
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
+            Dialog::ConfirmDeleteFolder {
+                account_id,
+                id,
+                name,
+            } => {
+                ui.heading(T::DeleteFolder.get(lang));
+                ui.label(format!(
+                    "« {name} » — {}",
+                    T::ConfirmDeleteFolderBody.get(lang)
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::Delete.get(lang)).clicked() {
+                        result = Some(Command::DeleteFolder {
+                            account_id: *account_id,
+                            id: id.clone(),
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
+        }
+    });
+    if close || modal.should_close() {
+        *state = None;
+    }
+    result
 }
 
 fn pane_frame(ui: &Ui) -> Frame {
@@ -157,11 +382,14 @@ fn tab_row(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, dark: bool) {
     });
 }
 
-fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Command> {
+fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Option<Command> {
     let lang = c.lang;
     let later = T::AvailableLater.get(lang);
+    let pick_first = T::SelectFirst.get(lang);
+    let has_selection = !c.mail.selection.is_empty();
+    let account = c.mail.folder.as_ref().map(|(a, _)| *a);
     let mut command = None;
-    match tab {
+    match view.tab {
         Tab::File => {
             group(ui, c, T::TabFile, |ui| {
                 if big_button(
@@ -186,8 +414,25 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Comma
                 big_button(ui, c, Icon::Envelope, T::NewEmail, false, later);
             });
             group(ui, c, T::GroupDelete, |ui| {
-                big_button(ui, c, Icon::Trash, T::Delete, false, later);
-                big_button(ui, c, Icon::Archive, T::Archive, false, later);
+                if big_button(ui, c, Icon::Trash, T::Delete, has_selection, pick_first).clicked() {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    command = delete_request(c, shift, &mut view.dialog);
+                }
+                let archive = account
+                    .and_then(|a| c.mail.folder_with_role(a, "archive"))
+                    .is_some();
+                if big_button(
+                    ui,
+                    c,
+                    Icon::Archive,
+                    T::Archive,
+                    has_selection && archive,
+                    pick_first,
+                )
+                .clicked()
+                {
+                    command = Some(Command::Archive);
+                }
             });
             group(ui, c, T::GroupRespond, |ui| {
                 ui.vertical(|ui| {
@@ -197,12 +442,33 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Comma
                 });
             });
             group(ui, c, T::GroupMove, |ui| {
-                big_button(ui, c, Icon::Folder, T::Move, false, later);
+                let button = big_button(ui, c, Icon::Folder, T::Move, has_selection, pick_first);
+                egui::Popup::menu(&button).show(|ui| {
+                    if let Some(a) = account
+                        && let Some(cmd) = folder_menu(ui, c, a)
+                    {
+                        command = Some(cmd);
+                    }
+                });
             });
             group(ui, c, T::GroupTags, |ui| {
                 ui.vertical(|ui| {
-                    small_button(ui, c, Icon::Envelope, T::UnreadRead, false, later);
-                    small_button(ui, c, Icon::Flag, T::Flag, false, later);
+                    if small_button(
+                        ui,
+                        c,
+                        Icon::Envelope,
+                        T::UnreadRead,
+                        has_selection,
+                        pick_first,
+                    )
+                    .clicked()
+                    {
+                        command = Some(Command::ToggleRead);
+                    }
+                    if small_button(ui, c, Icon::Flag, T::Flag, has_selection, pick_first).clicked()
+                    {
+                        command = Some(Command::ToggleFlag);
+                    }
                 });
             });
             group(ui, c, T::GroupSort, |ui| {
@@ -219,11 +485,63 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Comma
             });
         }
         Tab::Folder => {
+            let current = c.mail.current_folder();
+            let own = current.is_some_and(|f| f.role.is_none());
             group(ui, c, T::TabFolder, |ui| {
-                big_button(ui, c, Icon::FolderPlus, T::NewFolder, false, later);
+                if big_button(
+                    ui,
+                    c,
+                    Icon::FolderPlus,
+                    T::NewFolder,
+                    current.is_some(),
+                    pick_first,
+                )
+                .clicked()
+                    && let Some(f) = current
+                {
+                    view.dialog = Some(folder_name_dialog(
+                        f.account_id,
+                        Some(f.id.clone()),
+                        None,
+                        "",
+                    ));
+                }
                 ui.vertical(|ui| {
-                    small_button(ui, c, Icon::Rename, T::RenameFolder, false, later);
-                    small_button(ui, c, Icon::Trash, T::DeleteFolder, false, later);
+                    if small_button(
+                        ui,
+                        c,
+                        Icon::Rename,
+                        T::RenameFolder,
+                        own,
+                        T::OwnFoldersOnly.get(lang),
+                    )
+                    .clicked()
+                        && let Some(f) = current
+                    {
+                        view.dialog = Some(folder_name_dialog(
+                            f.account_id,
+                            None,
+                            Some(f.id.clone()),
+                            &f.name,
+                        ));
+                    }
+                    if small_button(
+                        ui,
+                        c,
+                        Icon::Trash,
+                        T::DeleteFolder,
+                        own,
+                        T::OwnFoldersOnly.get(lang),
+                    )
+                    .clicked()
+                        && let Some(f) = current
+                    {
+                        view.dialog = Some(Dialog::ConfirmDeleteFolder {
+                            account_id: f.account_id,
+                            id: f.id.clone(),
+                            name: f.name.clone(),
+                        });
+                    }
                 });
             });
         }
@@ -233,6 +551,42 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, tab: Tab, prefs: &mut Prefs) -> Option<Comma
             });
         }
     }
+    command
+}
+
+pub fn folder_name_dialog(
+    account_id: i64,
+    parent: Option<String>,
+    rename: Option<String>,
+    name: &str,
+) -> Dialog {
+    Dialog::FolderName {
+        account_id,
+        parent,
+        rename,
+        name: name.to_owned(),
+    }
+}
+
+/// "Move to" menu: the account's folders as an indented list, except the current one.
+pub fn folder_menu(ui: &mut Ui, c: &Ctx<'_>, account_id: i64) -> Option<Command> {
+    let current = c.mail.folder.as_ref().map(|(_, f)| f.as_str());
+    let mut command = None;
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            for (f, depth) in c.mail.folder_tree(account_id) {
+                if Some(f.id.as_str()) == current {
+                    continue;
+                }
+                let label = format!("{}{}", "    ".repeat(depth - 1), f.name);
+                if ui.button(label).clicked() {
+                    command = Some(Command::MoveTo {
+                        folder_id: f.id.clone(),
+                    });
+                }
+            }
+        });
     command
 }
 

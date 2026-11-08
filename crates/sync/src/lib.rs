@@ -10,9 +10,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use mailcraft_graph::auth::{self, AuthError, Tokens};
-use mailcraft_graph::{Graph, GraphError};
+use mailcraft_graph::{Graph, GraphError, Op};
 use mailcraft_store::{Folder, MasterKey, MessageBody, MessageSummary, ROLES, Store};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 
 pub const PROVIDER_MICROSOFT: &str = "microsoft";
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -32,8 +33,68 @@ pub struct Config {
 pub enum Request {
     AddMicrosoftAccount,
     SyncAll,
-    FetchBody { account_id: i64, id: String },
-    MarkRead { account_id: i64, id: String },
+    FetchBody {
+        account_id: i64,
+        id: String,
+    },
+    /// File messages in another folder (`dest` is a folder id).
+    Move {
+        account_id: i64,
+        ids: Vec<String>,
+        dest: String,
+    },
+    /// Permanent deletion.
+    Delete {
+        account_id: i64,
+        ids: Vec<String>,
+    },
+    SetRead {
+        account_id: i64,
+        ids: Vec<String>,
+        read: bool,
+    },
+    SetFlag {
+        account_id: i64,
+        ids: Vec<String>,
+        flagged: bool,
+    },
+    CreateFolder {
+        account_id: i64,
+        parent: Option<String>,
+        name: String,
+    },
+    RenameFolder {
+        account_id: i64,
+        id: String,
+        name: String,
+    },
+    DeleteFolder {
+        account_id: i64,
+        id: String,
+    },
+}
+
+/// A message change made locally, kept in the store until Microsoft accepts it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+enum PendingOp {
+    Move { id: String, dest: String },
+    Delete { id: String },
+    SetRead { id: String, read: bool },
+    SetFlag { id: String, flagged: bool },
+}
+
+impl PendingOp {
+    fn op(&self) -> Op<'_> {
+        match self {
+            Self::Move { id, dest } => Op::Move { id, dest },
+            Self::Delete { id } => Op::Delete { id },
+            Self::SetRead { id, read } => Op::SetRead { id, read: *read },
+            Self::SetFlag { id, flagged } => Op::SetFlag {
+                id,
+                flagged: *flagged,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +114,11 @@ pub enum Event {
     BodyReady {
         account_id: i64,
         id: String,
+    },
+    /// Changes could not be sent; they wait for the next sync.
+    Offline {
+        pending: usize,
+        reason: String,
     },
     Error(String),
 }
@@ -148,6 +214,7 @@ impl Runner {
         match request {
             Request::AddMicrosoftAccount => self.add_account(emit),
             Request::SyncAll => {
+                self.flush_pending(emit)?;
                 for account in self.store.accounts().map_err(|e| e.to_string())? {
                     self.sync_account(account.id, emit)?;
                 }
@@ -174,14 +241,141 @@ impl Runner {
                 emit(Event::BodyReady { account_id, id });
                 Ok(())
             }
-            Request::MarkRead { account_id, id } => {
-                self.store
-                    .set_read(account_id, &id, true)
+            Request::Move {
+                account_id,
+                ids,
+                dest,
+            } => {
+                let moved = self
+                    .store
+                    .move_local(account_id, &ids, &dest)
                     .map_err(|e| e.to_string())?;
-                emit(Event::Changed);
-                self.with_graph(account_id, |g| g.set_read(&id, true))
+                let ops = moved.into_iter().map(|(id, _)| PendingOp::Move {
+                    id,
+                    dest: dest.clone(),
+                });
+                self.queue(account_id, ops, emit)
+            }
+            Request::Delete { account_id, ids } => {
+                self.store
+                    .delete_local(account_id, &ids)
+                    .map_err(|e| e.to_string())?;
+                self.queue(
+                    account_id,
+                    ids.into_iter().map(|id| PendingOp::Delete { id }),
+                    emit,
+                )
+            }
+            Request::SetRead {
+                account_id,
+                ids,
+                read,
+            } => {
+                for id in &ids {
+                    self.store
+                        .set_read(account_id, id, read)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.queue(
+                    account_id,
+                    ids.into_iter().map(|id| PendingOp::SetRead { id, read }),
+                    emit,
+                )
+            }
+            Request::SetFlag {
+                account_id,
+                ids,
+                flagged,
+            } => {
+                for id in &ids {
+                    self.store
+                        .set_flag(account_id, id, flagged)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.queue(
+                    account_id,
+                    ids.into_iter().map(|id| PendingOp::SetFlag { id, flagged }),
+                    emit,
+                )
+            }
+            // Folder changes need the server's answer (new ids), so they are made online only.
+            Request::CreateFolder {
+                account_id,
+                parent,
+                name,
+            } => {
+                self.with_graph(account_id, |g| g.create_folder(parent.as_deref(), &name))?;
+                self.refresh_folders(account_id, emit).map(|_| ())
+            }
+            Request::RenameFolder {
+                account_id,
+                id,
+                name,
+            } => {
+                self.with_graph(account_id, |g| {
+                    g.apply(&Op::RenameFolder {
+                        id: &id,
+                        name: &name,
+                    })
+                })?;
+                self.refresh_folders(account_id, emit).map(|_| ())
+            }
+            Request::DeleteFolder { account_id, id } => {
+                self.with_graph(account_id, |g| g.apply(&Op::DeleteFolder { id: &id }))?;
+                self.refresh_folders(account_id, emit)?;
+                // Its messages now sit in Deleted Items on the server.
+                self.sync_account(account_id, emit)
             }
         }
+    }
+
+    /// Records local changes, shows them, then tries to send them all.
+    fn queue(
+        &mut self,
+        account_id: i64,
+        ops: impl Iterator<Item = PendingOp>,
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
+        for op in ops {
+            let json = serde_json::to_string(&op).map_err(|e| e.to_string())?;
+            self.store
+                .push_pending(account_id, &json)
+                .map_err(|e| e.to_string())?;
+        }
+        emit(Event::Changed);
+        self.flush_pending(emit)
+    }
+
+    /// Sends pending changes in order. A network failure keeps them for the next sync; a change
+    /// the server refuses is dropped and the folders are synced again so the local copy matches.
+    fn flush_pending(&mut self, emit: &dyn Fn(Event)) -> Result<(), String> {
+        let mut refused = Vec::new();
+        for (pid, account_id, json) in self.store.pending().map_err(|e| e.to_string())? {
+            let Ok(op) = serde_json::from_str::<PendingOp>(&json) else {
+                self.store.drop_pending(pid).map_err(|e| e.to_string())?;
+                continue;
+            };
+            match self.try_graph(account_id, |g| g.apply(&op.op())) {
+                Ok(_) | Err(GraphError::NotFound) => {}
+                Err(GraphError::Network(e)) => {
+                    emit(Event::Offline {
+                        pending: self.store.pending().map_or(0, |p| p.len()),
+                        reason: e,
+                    });
+                    return Ok(());
+                }
+                Err(e) => {
+                    refused.push(account_id);
+                    emit(Event::Error(e.to_string()));
+                }
+            }
+            self.store.drop_pending(pid).map_err(|e| e.to_string())?;
+        }
+        refused.dedup();
+        for account_id in refused {
+            self.sync_account(account_id, emit)?;
+        }
+        Ok(())
     }
 
     fn add_account(&mut self, emit: &dyn Fn(Event)) -> Result<(), String> {
@@ -245,17 +439,36 @@ impl Runner {
         account_id: i64,
         f: impl Fn(&Graph<'_>) -> mailcraft_graph::Result<T>,
     ) -> Result<T, String> {
-        let token = self.access_token(account_id, false)?;
+        self.try_graph(account_id, f).map_err(|e| e.to_string())
+    }
+
+    /// Like [`Self::with_graph`] but keeps the error kind. A session that cannot be refreshed
+    /// counts as a network problem: the change waits rather than being dropped.
+    fn try_graph<T>(
+        &mut self,
+        account_id: i64,
+        f: impl Fn(&Graph<'_>) -> mailcraft_graph::Result<T>,
+    ) -> mailcraft_graph::Result<T> {
+        let token = self
+            .access_token(account_id, false)
+            .map_err(GraphError::Network)?;
         match f(&Graph::new(&self.http, &token)) {
             Err(GraphError::Unauthorized) => {
-                let token = self.access_token(account_id, true)?;
-                f(&Graph::new(&self.http, &token)).map_err(|e| e.to_string())
+                let token = self
+                    .access_token(account_id, true)
+                    .map_err(GraphError::Network)?;
+                f(&Graph::new(&self.http, &token))
             }
-            r => r.map_err(|e| e.to_string()),
+            r => r,
         }
     }
 
-    fn sync_account(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
+    /// Lists the account's folders again and stores them. Returns them.
+    fn refresh_folders(
+        &mut self,
+        account_id: i64,
+        emit: &dyn Fn(Event),
+    ) -> Result<Vec<Folder>, String> {
         if !self.roles.contains_key(&account_id) {
             let mut roles = HashMap::new();
             for role in ROLES {
@@ -283,7 +496,20 @@ impl Runner {
             .replace_folders(account_id, &folders)
             .map_err(|e| e.to_string())?;
         emit(Event::Changed);
+        Ok(folders)
+    }
 
+    fn sync_account(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
+        let folders = self.refresh_folders(account_id, emit)?;
+        self.sync_folders(account_id, &folders, emit)
+    }
+
+    fn sync_folders(
+        &mut self,
+        account_id: i64,
+        folders: &[Folder],
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
         // Well-known folders first (inbox before everything), then the others.
         let mut order: Vec<&Folder> = folders.iter().collect();
         order.sort_by_key(|f| {

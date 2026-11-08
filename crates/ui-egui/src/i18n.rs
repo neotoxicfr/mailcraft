@@ -100,6 +100,22 @@ pub enum T {
     CacheClear,
     AvailableLater,
     SaveFailed,
+    // actions and dialogs
+    SelectFirst,
+    OwnFoldersOnly,
+    ItemsWord,
+    ItemsSelected,
+    MarkReadUnread,
+    MoveTo,
+    NewSubfolder,
+    FolderName,
+    Ok,
+    ConfirmPermanentTitle,
+    DeleteForGood,
+    ConfirmPermanentBody,
+    ConfirmDeleteFolderBody,
+    Offline,
+    PendingChanges,
 }
 
 impl T {
@@ -192,6 +208,30 @@ impl T {
                 "Arrive dans une prochaine version",
                 "Coming in a later version",
             ),
+            Self::SelectFirst => ("Sélectionnez d'abord un élément", "Select an item first"),
+            Self::OwnFoldersOnly => (
+                "Seulement pour vos propres dossiers",
+                "Only for folders you created",
+            ),
+            Self::ItemsWord => ("élément(s)", "item(s)"),
+            Self::ItemsSelected => ("éléments sélectionnés", "items selected"),
+            Self::MarkReadUnread => ("Marquer comme lu/non lu", "Mark as read/unread"),
+            Self::MoveTo => ("Déplacer vers", "Move to"),
+            Self::NewSubfolder => ("Nouveau sous-dossier", "New subfolder"),
+            Self::FolderName => ("Nom du dossier", "Folder name"),
+            Self::Ok => ("OK", "OK"),
+            Self::ConfirmPermanentTitle => ("Supprimer définitivement ?", "Delete permanently?"),
+            Self::DeleteForGood => ("Supprimer définitivement", "Delete permanently"),
+            Self::ConfirmPermanentBody => (
+                "élément(s) seront supprimés définitivement. Cette action est irréversible.",
+                "item(s) will be deleted permanently. This cannot be undone.",
+            ),
+            Self::ConfirmDeleteFolderBody => (
+                "ce dossier et son contenu iront dans Éléments supprimés.",
+                "this folder and its content will go to Deleted Items.",
+            ),
+            Self::Offline => ("Hors connexion", "Offline"),
+            Self::PendingChanges => ("modification(s) en attente", "change(s) waiting"),
             Self::SaveFailed => (
                 "Impossible d'enregistrer les réglages",
                 "Could not save settings",

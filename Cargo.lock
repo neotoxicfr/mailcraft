@@ -2097,6 +2097,8 @@ dependencies = [
  "mailcraft-graph",
  "mailcraft-store",
  "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@ fn sample_store(dir: &std::path::Path) -> mailcraft_store::Store {
             folder("in", "Boîte de réception", Some("inbox"), None, 1),
             folder("sent", "Éléments envoyés", Some("sentitems"), None, 0),
             folder("bills", "Factures", None, Some("in"), 0),
+            folder("trash", "Éléments supprimés", Some("deleteditems"), None, 0),
         ],
     )
     .unwrap();
@@ -78,11 +79,8 @@ fn sample_store(dir: &std::path::Path) -> mailcraft_store::Store {
     s
 }
 
-#[test]
-fn mailbox_lists_folders_and_reads_a_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_owned();
-    let mut h = Harness::builder()
+fn mailbox(path: std::path::PathBuf) -> Harness<'static, Option<MailCraftApp>> {
+    Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
             move |ui, app: &mut Option<MailCraftApp>| {
@@ -95,7 +93,13 @@ fn mailbox_lists_folders_and_reads_a_message() {
                 app.ui(ui);
             },
             None,
-        );
+        )
+}
+
+#[test]
+fn mailbox_lists_folders_and_reads_a_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
     h.run();
     h.get_by_label("Factures");
     h.get_by_label("Example Shop — Promo");
@@ -132,4 +136,54 @@ fn view_tab_switches_language_and_theme() {
     }
     h.run();
     assert_eq!(h.ctx.theme(), egui::Theme::Dark);
+}
+
+#[test]
+fn delete_two_messages_then_undo() {
+    use egui::{Key, Modifiers};
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Example Shop — Votre facture").click();
+    h.run();
+    h.get_by_label("Example Shop — Promo")
+        .click_modifiers(Modifiers::COMMAND);
+    h.run();
+    h.get_by_label("2 éléments sélectionnés");
+
+    h.key_press(Key::Delete);
+    h.run();
+    assert!(h.query_by_label("Example Shop — Promo").is_none());
+    assert!(h.query_by_label("Example Shop — Votre facture").is_none());
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    h.get_by_label("Example Shop — Promo");
+    h.get_by_label("Example Shop — Votre facture");
+}
+
+#[test]
+fn shift_delete_asks_before_deleting_for_good() {
+    use egui::{Key, Modifiers};
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Example Shop — Promo").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Delete);
+    h.run();
+    h.get_by_label("Supprimer définitivement ?");
+    h.get_by_label("Annuler").click();
+    h.run();
+    h.get_by_label("Example Shop — Promo");
+
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Delete);
+    h.run();
+    h.get_by_label("Supprimer définitivement").click();
+    h.run();
+    assert!(h.query_by_label("Example Shop — Promo").is_none());
+    // Nothing to put back after a permanent deletion.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert!(h.query_by_label("Example Shop — Promo").is_none());
 }

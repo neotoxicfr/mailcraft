@@ -196,6 +196,44 @@ impl Store {
                 COMMIT;",
             )?;
         }
+        if version < 2 {
+            // Changes made locally and not yet accepted by the server, replayed in order.
+            self.conn.execute_batch(
+                "BEGIN;
+                CREATE TABLE pending (
+                    id INTEGER PRIMARY KEY,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    op TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;
+                COMMIT;",
+            )?;
+        }
+        Ok(())
+    }
+
+    // ---- pending changes ----
+
+    pub fn push_pending(&self, account_id: i64, op: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO pending (account_id, op) VALUES (?1, ?2)",
+            params![account_id, op],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// (pending id, account id, op), oldest first.
+    pub fn pending(&self) -> Result<Vec<(i64, i64, String)>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id, account_id, op FROM pending ORDER BY id")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn drop_pending(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM pending WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -444,6 +482,77 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Files messages in `dest`, keeping both folders' counts in step. Returns (id, previous
+    /// folder) for each message actually moved, so the move can be undone.
+    pub fn move_local(
+        &mut self,
+        account_id: i64,
+        ids: &[String],
+        dest: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let tx = self.conn.transaction()?;
+        let mut moved = Vec::new();
+        for id in ids {
+            let Some((from, read)): Option<(String, bool)> = tx
+                .query_row(
+                    "SELECT folder_id, is_read FROM messages WHERE account_id = ?1 AND id = ?2",
+                    params![account_id, id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+            else {
+                continue;
+            };
+            if from == dest {
+                continue;
+            }
+            tx.execute(
+                "UPDATE messages SET folder_id = ?3 WHERE account_id = ?1 AND id = ?2",
+                params![account_id, id, dest],
+            )?;
+            let unread = i64::from(!read);
+            tx.execute(
+                "UPDATE folders SET total = MAX(0, total - 1), unread = MAX(0, unread - ?3)
+                 WHERE account_id = ?1 AND id = ?2",
+                params![account_id, from, unread],
+            )?;
+            tx.execute(
+                "UPDATE folders SET total = total + 1, unread = unread + ?3 WHERE account_id = ?1 AND id = ?2",
+                params![account_id, dest, unread],
+            )?;
+            moved.push((id.clone(), from));
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
+
+    /// Removes messages for good (permanent deletion), keeping folder counts in step.
+    pub fn delete_local(&mut self, account_id: i64, ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE folders SET total = MAX(0, total - 1),
+                    unread = MAX(0, unread - (SELECT 1 - is_read FROM messages WHERE account_id = ?1 AND id = ?2))
+                 WHERE account_id = ?1 AND id = (SELECT folder_id FROM messages WHERE account_id = ?1 AND id = ?2)",
+                params![account_id, id],
+            )?;
+            tx.execute(
+                "DELETE FROM messages WHERE account_id = ?1 AND id = ?2",
+                params![account_id, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_flag(&self, account_id: i64, id: &str, flagged: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET flagged = ?3 WHERE account_id = ?1 AND id = ?2",
+            params![account_id, id, flagged],
+        )?;
         Ok(())
     }
 

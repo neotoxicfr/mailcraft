@@ -79,6 +79,65 @@ fn plain_file_still_seals_tokens() {
 }
 
 #[test]
+fn local_moves_deletes_flags_and_pending_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    s.upsert_account("microsoft", "user@example.com", "User", "t")
+        .unwrap();
+    s.replace_folders(1, &[folder("inbox", 1), folder("trash", 0)])
+        .unwrap();
+    let mut read = msg("r", "inbox", 1, "read");
+    read.is_read = true;
+    s.apply_changes(1, "inbox", &[msg("u", "inbox", 2, "unread"), read], &[])
+        .unwrap();
+    let counts = |s: &Store, id: &str| {
+        let f = s
+            .folders(1)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == id)
+            .unwrap();
+        (f.unread, f.total)
+    };
+
+    let moved = s
+        .move_local(1, &["u".into(), "r".into(), "missing".into()], "trash")
+        .unwrap();
+    assert_eq!(
+        moved,
+        [
+            ("u".to_string(), "inbox".to_string()),
+            ("r".into(), "inbox".into())
+        ]
+    );
+    assert_eq!(counts(&s, "inbox"), (0, 8));
+    assert_eq!(counts(&s, "trash"), (1, 12));
+    // Moving into the folder it is already in changes nothing.
+    assert!(s.move_local(1, &["u".into()], "trash").unwrap().is_empty());
+
+    s.set_flag(1, "r", true).unwrap();
+    assert!(
+        s.messages(1, "trash", "", 10)
+            .unwrap()
+            .iter()
+            .any(|m| m.id == "r" && m.flagged)
+    );
+
+    s.delete_local(1, &["u".into()]).unwrap();
+    assert_eq!(counts(&s, "trash"), (0, 11));
+    assert_eq!(s.messages(1, "trash", "", 10).unwrap().len(), 1);
+
+    let a = s.push_pending(1, "{\"move\":1}").unwrap();
+    let b = s.push_pending(1, "{\"move\":2}").unwrap();
+    assert_eq!(
+        s.pending().unwrap().iter().map(|p| p.0).collect::<Vec<_>>(),
+        [a, b]
+    );
+    s.drop_pending(a).unwrap();
+    assert_eq!(s.pending().unwrap(), [(b, 1, "{\"move\":2}".to_string())]);
+}
+
+#[test]
 fn sync_changes_listing_search_and_read_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
