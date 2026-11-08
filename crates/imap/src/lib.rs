@@ -269,7 +269,8 @@ pub fn uid_set(uids: &[u32]) -> String {
     out
 }
 
-/// IMAP quoted string (folder names may hold spaces).
+/// IMAP quoted string, for the commands the library sends raw (UID COPY, SEARCH). SELECT,
+/// STATUS, MOVE, CREATE, RENAME, DELETE and APPEND are quoted by the library itself: never twice.
 fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -391,7 +392,7 @@ impl Imap {
 
     /// Selects `mailbox` read-write (needed to change flags or move), once.
     fn select(&mut self, mailbox: &str) -> Result<imap::types::Mailbox> {
-        let m = self.session.select(quote(mailbox)).map_err(|e| match e {
+        let m = self.session.select(mailbox).map_err(|e| match e {
             imap::Error::No(_) => Error::NotFound,
             e => Error::from(e),
         })?;
@@ -444,7 +445,7 @@ impl Imap {
         let mut out = Vec::new();
         for (id, parent, role, is_view) in raw {
             let role = role.filter(|r| taken.insert(*r));
-            let (unread, total) = match self.session.status(quote(&id), "(MESSAGES UNSEEN)") {
+            let (unread, total) = match self.session.status(&id, "(MESSAGES UNSEEN)") {
                 Ok(m) => (i64::from(m.unseen.unwrap_or(0)), i64::from(m.exists)),
                 Err(e @ (imap::Error::Io(_) | imap::Error::ConnectionLost)) => {
                     return Err(e.into());
@@ -604,7 +605,7 @@ impl Imap {
         };
         if self.can_move {
             self.session
-                .uid_mv(uid.to_string(), quote(dest))
+                .uid_mv(uid.to_string(), dest)
                 .map_err(Error::from)?;
         } else {
             self.session
@@ -655,19 +656,17 @@ impl Imap {
     }
 
     pub fn create_folder(&mut self, name: &str) -> Result<()> {
-        self.session.create(quote(name)).map_err(Error::from)
+        self.session.create(name).map_err(Error::from)
     }
 
     pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
         self.selected = None;
-        self.session
-            .rename(quote(from), quote(to))
-            .map_err(Error::from)
+        self.session.rename(from, to).map_err(Error::from)
     }
 
     pub fn delete_folder(&mut self, name: &str) -> Result<()> {
         self.selected = None;
-        self.session.delete(quote(name)).map_err(Error::from)
+        self.session.delete(name).map_err(Error::from)
     }
 
     /// Hierarchy separator of the server (`/` or `.`), for new sub-folders.
