@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MailCraft per-machine installer (WiX v5). Built by package.ps1:
+    wix build mailcraft.wxs -d Version=0.1.0 -d Exe=...\mailcraft.exe -d Icon=...\mailcraft.ico -d Root=... -o out.msi
+  The UpgradeCode never changes: a newer MSI replaces an older one.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="MailCraft"
+           Manufacturer="MailCraft contributors"
+           Version="$(var.Version)"
+           UpgradeCode="E7BEB6C2-BEDB-4859-81EB-E1A2B7C813CD"
+           Scope="perMachine"
+           Language="1036">
+    <SummaryInformation Description="MailCraft — client de messagerie" />
+    <MajorUpgrade DowngradeErrorMessage="Une version plus récente de MailCraft est déjà installée." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="MailCraftIcon" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="MailCraftIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/neotoxicfr/mailcraft" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="MailCraft" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainExe">
+        <File Id="MailCraftExe" Source="$(var.Exe)" KeyPath="yes">
+          <!-- The AppUserModelID lets new-mail notifications show "MailCraft" as their source
+               (same value as APP_ID in apps/mailcraft/src/desktop.rs). -->
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="MailCraft"
+                    Description="Client de messagerie"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="MailCraftIcon"
+                    Advertise="yes">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="Neotoxic.MailCraft" />
+          </Shortcut>
+        </File>
+      </Component>
+      <Component Id="Licenses">
+        <File Id="LicenseMit" Source="$(var.Root)\LICENSE-MIT" KeyPath="yes" />
+        <File Id="LicenseApache" Source="$(var.Root)\LICENSE-APACHE" />
+        <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" />
+        <File Id="Attribution" Source="$(var.Root)\ATTRIBUTION.md" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="MailCraft">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+  </Package>
+</Wix>

@@ -18,17 +18,25 @@ Claude to classify senders when an API key is set (optional).
   folder tree, message list grouped by date with search, reading pane (plain text for now).
   The local copy is encrypted by default (SQLCipher); the key lives in Windows Credential Manager
   and also seals the sign-in tokens, so no secret is ever stored in clear.
+- Milestone 3: a complete client. Delete, move, drag and drop, flags, undo (Ctrl+Z), folders;
+  offline full-text search plus server search; formatted reading (pure-Rust simplified view, or
+  the original through Edge WebView2 with scripts off); attachments; writing with a rich-text
+  editor, replies, forwards, drafts, large attachments, signature, address completion.
+- Milestone 5: clean-up view. Per sender: mail count, unread share, SPF/DKIM/DMARC, how to
+  unsubscribe (RFC 8058 one-click, e-mail or web page), and warnings (brand impersonation,
+  lookalike, punycode, generated or impossible domains, mail "from yourself"). Grouped
+  unsubscribe, delete all, archive all, block (junk + rule), allow-list, action log. Simulation is
+  on by default, suspect senders are never unsubscribed from automatically.
+- Milestone 7: File › Options, a skippable first-launch assistant, screening of new senders,
+  tracker blocking.
+- Milestone 8: notification-area icon, start with Windows (minimised or not), close to the
+  notification area, one running instance, new-mail notifications, MSI installer (built by the
+  Release workflow).
 
 ## Planned
 
-- Accounts: Microsoft (Outlook.com/Hotmail, through Microsoft Graph), Gmail, any IMAP/SMTP server.
-- Read, write, folders, local full-text search; simplified HTML rendering by default, the original
-  on request.
-- Clean-up view per sender, safe unsubscribe, bulk archive/delete, block rules, action log, undo.
-- Dry-run by default, allow-list of senders never touched, no automatic unsubscribe for suspect
-  senders.
-- Optional: tracker blocking, screening of new senders, newsletter digest.
-- Windows installer (MSI), start at sign-in (minimised or not), notification-area icon.
+- Claude classification of senders (optional API key) and a daily newsletter digest.
+- Gmail and generic IMAP/SMTP accounts.
 
 ## Build
 

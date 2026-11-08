@@ -1,6 +1,7 @@
 //! Microsoft Graph mail: sign-in ([`auth`]) and the few calls MailCraft needs.
 
 pub mod auth;
+pub mod cleanup;
 pub mod compose;
 
 use std::time::Duration;

@@ -1,0 +1,13 @@
+[package]
+name = "mailcraft-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Local, offline sender analysis: unsubscribe headers (RFC 2369/8058), SPF/DKIM/DMARC results, brand impersonation and lookalike domains"
+
+[lints]
+workspace = true
+
+[dependencies]
+url = { workspace = true }

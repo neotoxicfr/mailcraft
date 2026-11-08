@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 use base64::Engine;
 use mailcraft_store::{Account, Attachment, Folder, MessageBody, MessageSummary, ROLES, Store};
 
+/// Id of the screener's virtual folder « À valider ».
+pub const SCREENER: &str = "__screener";
+
 /// Most recent messages listed per folder; older ones stay in the store.
 const LIST_LIMIT: usize = 5000;
 
@@ -19,6 +22,12 @@ pub enum Status {
     },
     UpToDate,
     SearchingServer,
+    RebuildScheduled,
+    CleanupDone {
+        done: usize,
+        skipped: usize,
+        dry_run: bool,
+    },
     Sent,
     AttachmentSaved,
     ServerFound(usize),
@@ -54,6 +63,12 @@ pub struct Mail {
     /// Remote images: asked for, loaded (bytes given to egui), or failed.
     pub images_requested: HashSet<String>,
     pub images_ready: HashSet<String>,
+    /// Clean-up view: senders of the current account, the action log, analysis progress.
+    pub senders: Vec<mailcraft_store::SenderRow>,
+    pub actions: Vec<mailcraft_store::ActionEntry>,
+    pub analyzing: Option<(usize, usize)>,
+    /// Senders waiting in the screener (when it is on).
+    pub screening: usize,
     pub status: Status,
     pub signing_in: bool,
     /// The list shows search results (all folders) rather than one folder.
@@ -63,17 +78,53 @@ pub struct Mail {
 }
 
 impl Mail {
-    pub fn reload(&mut self, store: &Store, search: &str) -> mailcraft_store::Result<()> {
+    pub fn reload(
+        &mut self,
+        store: &Store,
+        search: &str,
+        cleanup: bool,
+        screener: Option<i64>,
+    ) -> mailcraft_store::Result<()> {
+        if cleanup
+            && let Some((account, _)) = self
+                .folder
+                .clone()
+                .or_else(|| self.accounts.first().map(|a| (a.id, String::new())))
+        {
+            self.senders = store.senders(account)?;
+            self.actions = store.actions_log(200)?;
+        }
         self.encrypted = Some(store.is_encrypted());
         self.accounts = store.accounts()?;
         self.folders.clear();
         for a in &self.accounts {
             self.folders.extend(store.folders(a.id)?);
         }
+        self.screening = 0;
+        if let Some(since) = screener {
+            let account = self
+                .folder
+                .as_ref()
+                .map(|(a, _)| *a)
+                .or(self.accounts.first().map(|a| a.id));
+            if let Some(inbox) = account
+                .and_then(|a| self.folder_with_role(a, "inbox"))
+                .map(|f| (f.account_id, f.id.clone()))
+            {
+                let waiting = store.screening(inbox.0, &inbox.1, since)?;
+                let senders: HashSet<String> = waiting
+                    .into_iter()
+                    .map(|m| m.from_addr.to_lowercase())
+                    .collect();
+                self.screening = senders.len();
+            }
+        }
         let valid = self.folder.as_ref().is_some_and(|(a, f)| {
-            self.folders
-                .iter()
-                .any(|x| x.account_id == *a && &x.id == f)
+            (f == SCREENER && screener.is_some())
+                || self
+                    .folders
+                    .iter()
+                    .any(|x| x.account_id == *a && &x.id == f)
         });
         if !valid {
             self.folder = self
@@ -87,6 +138,10 @@ impl Mail {
         self.searching = !search.trim().is_empty();
         self.messages = match &self.folder {
             Some((a, _)) if self.searching => store.search(*a, search, LIST_LIMIT)?,
+            Some((a, f)) if f == SCREENER => match (screener, self.folder_with_role(*a, "inbox")) {
+                (Some(since), Some(inbox)) => store.screening(*a, &inbox.id.clone(), since)?,
+                _ => Vec::new(),
+            },
             Some((a, f)) => store.messages(*a, f, "", LIST_LIMIT)?,
             None => Vec::new(),
         };

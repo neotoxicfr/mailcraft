@@ -116,6 +116,21 @@ pub enum Request {
         account_id: i64,
         draft_id: String,
     },
+    /// Reads the headers of each sender's latest message (only senders not analysed yet,
+    /// or all with `force`) and stores what the local analysis finds.
+    AnalyzeSenders {
+        account_id: i64,
+        force: bool,
+    },
+    /// A clean-up action on senders. `dry_run` only logs what would happen. `protected` lists
+    /// addresses and domains never to touch (the allow-list), checked again here.
+    Cleanup {
+        account_id: i64,
+        addresses: Vec<String>,
+        action: CleanAction,
+        dry_run: bool,
+        protected: Vec<String>,
+    },
 }
 
 /// A message change made locally, kept in the store until Microsoft accepts it.
@@ -183,6 +198,21 @@ pub enum Event {
     SendFailed {
         composer: u64,
         error: String,
+    },
+    Analyzing {
+        done: usize,
+        total: usize,
+    },
+    AnalysisDone,
+    /// Clean-up finished: actions done (or simulated) and senders skipped by a safeguard.
+    CleanupDone {
+        done: usize,
+        skipped: usize,
+        dry_run: bool,
+    },
+    /// An unsubscribe that only has a web page: the UI opens it for the user to confirm.
+    OpenPage {
+        url: String,
     },
     /// Changes could not be sent; they wait for the next sync.
     Offline {
@@ -517,6 +547,26 @@ impl Runner {
                 }
                 Ok(())
             }
+            Request::AnalyzeSenders { account_id, force } => {
+                self.analyze_senders(account_id, force, emit)
+            }
+            Request::Cleanup {
+                account_id,
+                addresses,
+                action,
+                dry_run,
+                protected,
+            } => {
+                let (done, skipped) =
+                    self.cleanup(account_id, &addresses, action, dry_run, &protected, emit)?;
+                emit(Event::Changed);
+                emit(Event::CleanupDone {
+                    done,
+                    skipped,
+                    dry_run,
+                });
+                Ok(())
+            }
             Request::DiscardDraft {
                 account_id,
                 draft_id,
@@ -737,6 +787,230 @@ impl Runner {
             self.sync_contacts(account_id);
         }
         Ok(())
+    }
+
+    fn analyze_senders(
+        &mut self,
+        account_id: i64,
+        force: bool,
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
+        // The user's own addresses: mail "from yourself" that fails DMARC is a scam.
+        let own: Vec<String> = self
+            .store
+            .accounts()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|a| a.email)
+            .collect();
+        let todo: Vec<(String, String, Option<String>)> = self
+            .store
+            .senders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|s| force || s.analysis.is_none())
+            .map(|s| {
+                let kept = s.analysis.map(|a| a.headers).filter(|h| !h.is_empty());
+                (s.address, s.name, kept)
+            })
+            .collect();
+        let total = todo.len();
+        for (done, (address, name, kept)) in todo.into_iter().enumerate() {
+            if done % 10 == 0 {
+                emit(Event::Analyzing { done, total });
+            }
+            // Analysed before: the kept headers are enough, no network needed.
+            let headers = match kept {
+                Some(text) => parse_kept_headers(&text),
+                None => {
+                    let Some(id) = self
+                        .store
+                        .latest_from(account_id, &address)
+                        .map_err(|e| e.to_string())?
+                    else {
+                        continue;
+                    };
+                    match self.try_graph(account_id, |g| g.headers(&id)) {
+                        Ok(h) => h,
+                        Err(GraphError::NotFound) => continue,
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+            };
+            let analysis = analyze(&name, &address, &headers, &own);
+            self.store
+                .put_sender_analysis(account_id, &address, &analysis)
+                .map_err(|e| e.to_string())?;
+        }
+        emit(Event::Analyzing { done: total, total });
+        emit(Event::Changed);
+        emit(Event::AnalysisDone);
+        Ok(())
+    }
+
+    /// Folder id of a well-known folder (`deleteditems`, `archive`, `junkemail`).
+    fn role_folder(
+        &mut self,
+        account_id: i64,
+        role: &str,
+        emit: &dyn Fn(Event),
+    ) -> Result<String, String> {
+        if !self.roles.contains_key(&account_id) {
+            self.refresh_folders(account_id, emit)?;
+        }
+        self.roles
+            .get(&account_id)
+            .and_then(|r| r.iter().find(|(_, v)| *v == role).map(|(id, _)| id.clone()))
+            .ok_or_else(|| format!("no {role} folder in this mailbox"))
+    }
+
+    /// Runs (or simulates) a clean-up action on each sender. Returns (done, skipped).
+    fn cleanup(
+        &mut self,
+        account_id: i64,
+        addresses: &[String],
+        action: CleanAction,
+        dry_run: bool,
+        protected: &[String],
+        emit: &dyn Fn(Event),
+    ) -> Result<(usize, usize), String> {
+        let senders = self.store.senders(account_id).map_err(|e| e.to_string())?;
+        let (mut done, mut skipped) = (0, 0);
+        for address in addresses {
+            let log = |store: &Store, kind: &str, detail: String, ok: bool| {
+                let _ = store.log_action(&mailcraft_store::ActionEntry {
+                    at: unix_now(),
+                    account_id,
+                    address: address.clone(),
+                    action: kind.to_owned(),
+                    detail,
+                    dry_run,
+                    ok,
+                });
+            };
+            if is_protected(address, protected) {
+                log(
+                    &self.store,
+                    action.code(),
+                    "allow-list: left untouched".into(),
+                    false,
+                );
+                skipped += 1;
+                continue;
+            }
+            let row = senders
+                .iter()
+                .find(|s| s.address.eq_ignore_ascii_case(address));
+            match action {
+                CleanAction::Unsubscribe => {
+                    let Some(row) = row else { continue };
+                    if let Some(reason) = unsubscribe_refusal(row) {
+                        log(&self.store, "unsubscribe", reason.into(), false);
+                        skipped += 1;
+                        continue;
+                    }
+                    let a = row.analysis.clone().unwrap_or_default();
+                    let (detail, result) = if let Some(url) = &a.one_click {
+                        let r = if dry_run {
+                            Ok(())
+                        } else {
+                            one_click(&self.images, url)
+                        };
+                        (format!("one-click POST {url}"), r)
+                    } else if let Some((to, subject)) = a
+                        .mailto
+                        .as_deref()
+                        .and_then(mailcraft_analysis::mailto_parts)
+                    {
+                        let r = if dry_run {
+                            Ok(())
+                        } else {
+                            self.with_graph(account_id, |g| {
+                                g.send_plain(&to, &subject, "unsubscribe")
+                            })
+                        };
+                        (format!("e-mail to {to} « {subject} »"), r)
+                    } else if let Some(url) = &a.web {
+                        if !dry_run {
+                            emit(Event::OpenPage { url: url.clone() });
+                        }
+                        (format!("page opened for you to confirm: {url}"), Ok(()))
+                    } else {
+                        log(
+                            &self.store,
+                            "unsubscribe",
+                            "no unsubscribe link in its mail".into(),
+                            false,
+                        );
+                        skipped += 1;
+                        continue;
+                    };
+                    let ok = result.is_ok();
+                    log(
+                        &self.store,
+                        "unsubscribe",
+                        result
+                            .err()
+                            .map_or(detail.clone(), |e| format!("{detail}: {e}")),
+                        ok,
+                    );
+                    if ok {
+                        done += 1;
+                        if !dry_run {
+                            self.store
+                                .mark_unsubscribed(account_id, address, unix_now())
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                CleanAction::DeleteAll | CleanAction::ArchiveAll | CleanAction::Block => {
+                    let role = match action {
+                        CleanAction::DeleteAll => "deleteditems",
+                        CleanAction::ArchiveAll => "archive",
+                        _ => "junkemail",
+                    };
+                    let dest = self.role_folder(account_id, role, emit)?;
+                    let ids: Vec<String> = self
+                        .with_graph(account_id, |g| g.messages_from(address))?
+                        .into_iter()
+                        .filter(|(_, folder)| *folder != dest)
+                        .map(|(id, _)| id)
+                        .collect();
+                    if !dry_run {
+                        for id in &ids {
+                            match self
+                                .try_graph(account_id, |g| g.apply(&Op::Move { id, dest: &dest }))
+                            {
+                                Ok(_) | Err(GraphError::NotFound) => {}
+                                Err(e) => return Err(e.to_string()),
+                            }
+                        }
+                        self.store
+                            .move_local(account_id, &ids, &dest)
+                            .map_err(|e| e.to_string())?;
+                        if action == CleanAction::Block {
+                            self.with_graph(account_id, |g| g.block_rule(address, &dest))?;
+                            self.store
+                                .mark_blocked(account_id, address)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    let rule = if action == CleanAction::Block {
+                        " + rule for new mail"
+                    } else {
+                        ""
+                    };
+                    log(
+                        &self.store,
+                        action.code(),
+                        format!("{} message(s) → {role}{rule}", ids.len()),
+                        true,
+                    );
+                    done += 1;
+                }
+            }
+        }
+        Ok((done, skipped))
     }
 
     /// Reads the address book for completion. Needs Contacts.Read, which accounts added before
@@ -1022,5 +1296,266 @@ impl Compose {
             Self::ReplyAll(m) => Base::ReplyAll(m),
             Self::Forward(m) => Base::Forward(m),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanAction {
+    Unsubscribe,
+    DeleteAll,
+    ArchiveAll,
+    /// Junk folder now and a rule for new mail.
+    Block,
+}
+
+impl CleanAction {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Unsubscribe => "unsubscribe",
+            Self::DeleteAll => "delete-all",
+            Self::ArchiveAll => "archive-all",
+            Self::Block => "block",
+        }
+    }
+}
+
+/// Allow-list entries are addresses (`a@b.fr`) or domains (`b.fr`, which also covers
+/// `news.b.fr`).
+pub fn is_protected(address: &str, protected: &[String]) -> bool {
+    let address = address.to_ascii_lowercase();
+    let domain = mailcraft_analysis::domain_of(&address);
+    protected
+        .iter()
+        .map(|p| p.trim().to_ascii_lowercase())
+        .filter(|p| !p.is_empty())
+        .any(|p| {
+            if p.contains('@') {
+                p == address
+            } else {
+                domain == p || domain.ends_with(&format!(".{p}"))
+            }
+        })
+}
+
+/// Why MailCraft will not unsubscribe from this sender automatically, if it will not.
+pub fn unsubscribe_refusal(row: &mailcraft_store::SenderRow) -> Option<&'static str> {
+    let analysis = row.analysis.as_ref()?;
+    if !analysis.warnings.is_empty() || analysis.category == "suspect" {
+        return Some("suspect sender: clicking its links could confirm your address to a scammer");
+    }
+    if row.blocked {
+        return Some("sender already blocked");
+    }
+    match &row.ai {
+        Some(ai) if matches!(ai.category.as_str(), "suspect" | "phishing") => {
+            Some("Claude rates it suspect or phishing")
+        }
+        Some(ai) if ai.confidence < 0.8 => Some("Claude is not confident enough (below 0.8)"),
+        _ => None,
+    }
+}
+
+/// Headers of a sender's latest message → what MailCraft stores about it.
+/// Headers the analysis reads, kept to analyse again without the network.
+const LINE_BREAKS: [char; 2] = ['\r', '\n'];
+const KEPT_HEADERS: [&str; 3] = [
+    "List-Unsubscribe",
+    "List-Unsubscribe-Post",
+    "Authentication-Results",
+];
+
+/// Back from the stored "Name: value" lines.
+pub fn parse_kept_headers(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            l.split_once(": ")
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        })
+        .collect()
+}
+
+pub fn analyze(
+    name: &str,
+    address: &str,
+    headers: &[(String, String)],
+    own: &[String],
+) -> mailcraft_store::SenderAnalysis {
+    use mailcraft_analysis::{Check, authentication, category, unsubscribe, warnings};
+    let get = |n: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(n))
+            .map(|(_, v)| v.as_str())
+    };
+    let auth_headers: Vec<&str> = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("Authentication-Results"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let auth = authentication(&auth_headers);
+    let unsub = unsubscribe(get("List-Unsubscribe"), get("List-Unsubscribe-Post"));
+    let warns = warnings(name, address, auth, own);
+    let code = |c: Check| match c {
+        Check::Pass => 1,
+        Check::Fail => 2,
+        Check::Unknown => 0,
+    };
+    let cat = match category(&unsub, &warns) {
+        mailcraft_analysis::Category::Suspect => "suspect",
+        mailcraft_analysis::Category::Newsletter => "newsletter",
+        mailcraft_analysis::Category::Other => "other",
+    };
+    mailcraft_store::SenderAnalysis {
+        one_click: unsub.one_click,
+        mailto: unsub.mailto,
+        web: unsub.web,
+        spf: code(auth.spf),
+        dkim: code(auth.dkim),
+        dmarc: code(auth.dmarc),
+        warnings: warns.iter().map(warning_code).collect::<Vec<_>>().join(","),
+        category: cat.to_owned(),
+        analyzed_at: unix_now(),
+        headers: headers
+            .iter()
+            .filter(|(k, _)| KEPT_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)))
+            .map(|(k, v)| format!("{k}: {}", v.replace(LINE_BREAKS, " ")))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn warning_code(w: &mailcraft_analysis::Warning) -> String {
+    use mailcraft_analysis::Warning;
+    match w {
+        Warning::Impersonation { brand } => format!("impersonation:{brand}"),
+        Warning::Lookalike { brand } => format!("lookalike:{brand}"),
+        Warning::Punycode => "punycode".into(),
+        Warning::DmarcFail => "dmarc-fail".into(),
+        Warning::AuthFail => "auth-fail".into(),
+        Warning::OwnAddress => "own-address".into(),
+        Warning::InvalidDomain => "invalid-domain".into(),
+        Warning::RandomDomain => "random-domain".into(),
+        Warning::DisplayDomain { shown } => format!("display-domain:{shown}"),
+    }
+}
+
+/// RFC 8058 one-click unsubscribe: POST `List-Unsubscribe=One-Click` to the https link, never to
+/// this machine or the local network.
+fn one_click(http: &Client, url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "https" || parsed.host().is_none_or(is_local_host) {
+        return Err("refused: not a public https address".into());
+    }
+    let resp = http
+        .post(parsed)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("List-Unsubscribe=One-Click")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() || resp.status().is_redirection() {
+        Ok(())
+    } else {
+        Err(format!("server answered {}", resp.status()))
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::{analyze, is_protected, unsubscribe_refusal};
+    use mailcraft_store::{AiVerdict, SenderRow};
+
+    fn h(k: &str, v: &str) -> (String, String) {
+        (k.into(), v.into())
+    }
+
+    #[test]
+    fn analysis_from_headers() {
+        let a = analyze(
+            "Shop News",
+            "news@shop.example",
+            &[
+                h(
+                    "List-Unsubscribe",
+                    "<https://shop.example/u?x=1>, <mailto:u@shop.example>",
+                ),
+                h("list-unsubscribe-post", "List-Unsubscribe=One-Click"),
+                h(
+                    "Authentication-Results",
+                    "spf=pass smtp.mailfrom=shop.example; dkim=pass; dmarc=pass",
+                ),
+                h("Received", "from somewhere"),
+            ],
+            &[],
+        );
+        assert_eq!(a.one_click.as_deref(), Some("https://shop.example/u?x=1"));
+        // Only the headers the analysis reads are kept, and they parse back to the same result.
+        assert!(!a.headers.contains("Received"));
+        let again = analyze(
+            "Shop News",
+            "news@shop.example",
+            &super::parse_kept_headers(&a.headers),
+            &[],
+        );
+        assert_eq!(
+            (again.one_click, again.spf, again.dmarc),
+            (a.one_click.clone(), a.spf, a.dmarc)
+        );
+        assert_eq!(
+            (a.spf, a.dkim, a.dmarc, a.category.as_str()),
+            (1, 1, 1, "newsletter")
+        );
+        assert!(a.warnings.is_empty());
+
+        let p = analyze(
+            "PayPal",
+            "x@pay-secure.example",
+            &[h("Authentication-Results", "dmarc=fail")],
+            &[],
+        );
+        assert_eq!(
+            (p.category.as_str(), p.warnings.as_str()),
+            ("suspect", "impersonation:paypal,dmarc-fail")
+        );
+    }
+
+    #[test]
+    fn allow_list_and_refusals() {
+        let list = vec![
+            "impots.gouv.fr".to_string(),
+            "boss@work.example".to_string(),
+        ];
+        assert!(is_protected("no-reply@dgfip.impots.gouv.fr", &list));
+        assert!(is_protected("BOSS@work.example", &list));
+        assert!(!is_protected("other@work.example", &list));
+        assert!(!is_protected("x@notimpots.gouv.fr", &list));
+
+        let mut row = SenderRow {
+            address: "news@shop.example".into(),
+            name: "Shop".into(),
+            count: 3,
+            unread: 1,
+            last: 0,
+            analysis: Some(analyze(
+                "Shop",
+                "news@shop.example",
+                &[h("List-Unsubscribe", "<mailto:u@shop.example>")],
+                &[],
+            )),
+            unsubscribed_at: None,
+            blocked: false,
+            ai: None,
+            still_writing: false,
+        };
+        assert_eq!(unsubscribe_refusal(&row), None);
+        row.ai = Some(AiVerdict {
+            category: "promo".into(),
+            confidence: 0.6,
+            ..Default::default()
+        });
+        assert!(unsubscribe_refusal(&row).is_some());
+        row.ai = None;
+        row.analysis = Some(analyze("PayPal", "x@pay-secure.example", &[], &[]));
+        assert!(unsubscribe_refusal(&row).unwrap().starts_with("suspect"));
     }
 }

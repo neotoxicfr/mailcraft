@@ -17,6 +17,7 @@ mailcraft-store = { path = "crates/store" }
 mailcraft-graph = { path = "crates/graph" }
 mailcraft-sync = { path = "crates/sync" }
 mailcraft-html = { path = "crates/html" }
+mailcraft-analysis = { path = "crates/analysis" }
 
 # reading: HTML parsing, original view (Edge WebView2), attachments
 scraper = { version = "0.29", default-features = false }

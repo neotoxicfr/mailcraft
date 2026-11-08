@@ -68,13 +68,33 @@ pub fn folder_pane(
     }
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         section_title(ui, T::Favorites.get(c.lang));
-        for f in mail.folders.iter().filter(|f| {
-            matches!(
-                f.role.as_deref(),
-                Some("inbox" | "sentitems" | "deleteditems")
-            )
-        }) {
-            folder_row(ui, c, f, 1, dialog, command);
+        // Inbox, Sent, Deleted: in that order, for every account.
+        for role in ["inbox", "sentitems", "deleteditems"] {
+            for f in mail
+                .folders
+                .iter()
+                .filter(|f| f.role.as_deref() == Some(role))
+            {
+                folder_row(ui, c, f, 1, dialog, command);
+            }
+        }
+        if c.screener
+            && let Some(inbox) = mail
+                .folders
+                .iter()
+                .find(|f| f.role.as_deref() == Some("inbox"))
+        {
+            // Virtual folder: the count is of senders waiting, not of messages.
+            let screen = mailcraft_store::Folder {
+                account_id: inbox.account_id,
+                id: crate::mail::SCREENER.into(),
+                parent_id: None,
+                name: T::ToScreen.get(c.lang).into(),
+                role: None,
+                unread: mail.screening as i64,
+                total: 0,
+            };
+            folder_row(ui, c, &screen, 1, &mut None, command);
         }
         for account in &mail.accounts {
             ui.add_space(8.0);
@@ -519,6 +539,9 @@ fn weekday(d: &DateTime<Local>, lang: Lang) -> &'static str {
 
 /// Time today, weekday and time within the week, date before that.
 fn short_date(ts: i64, now: DateTime<Local>, lang: Lang) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
     let d = local(ts);
     let days = (now.date_naive() - d.date_naive()).num_days();
     if days <= 0 {
@@ -587,6 +610,35 @@ pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, command: &mut Opt
                 );
             }
         }
+    }
+    if c.mail
+        .folder
+        .as_ref()
+        .is_some_and(|(_, f)| f == crate::mail::SCREENER)
+    {
+        egui::Frame::group(ui.style())
+            .fill(c.accent.gamma_multiply(0.12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(T::NewSender.get(c.lang));
+                    if ui.button(T::Accept.get(c.lang)).clicked() {
+                        *command = Some(Command::Screen {
+                            address: m.from_addr.clone(),
+                            accept: true,
+                        });
+                    }
+                    if ui
+                        .button(T::Refuse.get(c.lang))
+                        .on_hover_text(T::RefuseHelp.get(c.lang))
+                        .clicked()
+                    {
+                        *command = Some(Command::Screen {
+                            address: m.from_addr.clone(),
+                            accept: false,
+                        });
+                    }
+                });
+            });
     }
     attachments(ui, c, command);
     let has_html = !c.mail.original_html.is_empty();
@@ -713,6 +765,25 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
                     T::Syncing.get(lang),
                     T::MessagesWord.get(lang)
                 )));
+            }
+            Status::CleanupDone {
+                done,
+                skipped,
+                dry_run,
+            } => {
+                let what = if *dry_run {
+                    T::CleanupSimulated
+                } else {
+                    T::CleanupDone
+                };
+                ui.label(small(format!(
+                    "{} : {done}, {skipped} {}",
+                    what.get(lang),
+                    T::SkippedWord.get(lang)
+                )));
+            }
+            Status::RebuildScheduled => {
+                ui.label(small(T::RebuildScheduled.get(lang).into()));
             }
             Status::Sent => {
                 ui.label(small(T::Sent.get(lang).into()));

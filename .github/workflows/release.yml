@@ -1,0 +1,41 @@
+name: Release
+
+# A version tag (v1.2.3) builds the MSI and creates the GitHub release with an empty body:
+# release notes are written by hand afterwards (gh release edit vX.Y.Z --notes-file …).
+# Run by hand (workflow_dispatch) to only build the MSI as an artifact.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0' }
+          "value=$v" >> $env:GITHUB_OUTPUT
+      - name: Build MSI
+        shell: pwsh
+        run: packaging/windows/package.ps1 -Version ${{ steps.version.outputs.value }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mailcraft-msi
+          path: dist/*.msi
+      - name: Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist/*.msi).FullName --title $env:GITHUB_REF_NAME --notes " "

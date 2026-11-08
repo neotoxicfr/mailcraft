@@ -18,3 +18,11 @@ log = { workspace = true }
 # Original view of a message: Edge WebView2 as a child of the main window.
 wry = { workspace = true }
 open = { workspace = true }
+# Notification-area icon (with its menu) and new-mail notifications.
+tray-icon = "0.26"
+tauri-winrt-notification = "0.8"
+
+[target.'cfg(windows)'.build-dependencies]
+# Icon + VERSIONINFO for mailcraft.exe, drawn by src/art.rs at build time.
+winresource = "0.1"
+ico = "0.6"

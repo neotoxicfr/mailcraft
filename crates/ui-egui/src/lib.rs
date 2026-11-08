@@ -1,15 +1,18 @@
 //! MailCraft user interface.
 
 mod attachments;
+mod cleanup;
 mod composer;
 mod fonts;
 pub mod i18n;
 mod icons;
 pub mod mail;
+mod options;
 mod panes;
 mod reader;
 pub mod settings;
 pub mod shell;
+mod startup;
 pub mod theme;
 
 use std::time::Instant;
@@ -48,6 +51,12 @@ pub struct MailCraftApp {
     /// Moves that Ctrl+Z puts back, newest last.
     undo: Vec<Undo>,
     next_composer: u64,
+    /// Real app (not a test): touches Windows (start-up entry).
+    integrations: bool,
+    applied_startup: Option<settings::Startup>,
+    /// Newest inbox message already announced, and what to announce next.
+    notify_seen: Option<i64>,
+    new_mail: Option<(usize, String, String)>,
 }
 
 impl MailCraftApp {
@@ -61,7 +70,107 @@ impl MailCraftApp {
             }
             Err(e) => app.mail.status = Status::Error(e),
         }
+        app.integrations = true;
+        app.apply_integrations();
+        if !app.settings.get().general.onboarded {
+            app.start_welcome();
+        }
         app
+    }
+
+    /// Work that goes on even while the window is hidden in the notification area: worker
+    /// events, reloading what changed, spotting new mail.
+    pub fn background(&mut self, ctx: &Context) {
+        self.handle_events(ctx);
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        let prefs = self.settings.get();
+        let screener = prefs
+            .cleanup
+            .screener
+            .then_some(prefs.cleanup.screener_since);
+        if let Some(b) = &self.backend
+            && let Err(e) = self.mail.reload(
+                &b.store,
+                &self.view.search,
+                self.view.cleanup_open,
+                screener,
+            )
+        {
+            self.mail.status = Status::Error(e.to_string());
+        }
+        if let Some((account_id, id)) = self.mail.wants_inline() {
+            self.send(Request::FetchInline { account_id, id });
+        }
+        self.check_new_mail();
+    }
+
+    /// New unread mail in the first account's inbox since the last look, for a notification.
+    /// The first look only records where things stand.
+    fn check_new_mail(&mut self) {
+        let Some(b) = &self.backend else { return };
+        let Some(inbox) = self
+            .mail
+            .accounts
+            .first()
+            .and_then(|a| self.mail.folder_with_role(a.id, "inbox"))
+        else {
+            return;
+        };
+        let Ok(latest) = b.store.messages(inbox.account_id, &inbox.id, "", 30) else {
+            return;
+        };
+        let newest = latest.iter().map(|m| m.received).max().unwrap_or(0);
+        if let Some(seen) = self.notify_seen {
+            let new: Vec<&mailcraft_store::MessageSummary> = latest
+                .iter()
+                .filter(|m| m.received > seen && !m.is_read)
+                .collect();
+            if let Some(first) = new.first() {
+                let sender = if first.from_name.is_empty() {
+                    first.from_addr.clone()
+                } else {
+                    first.from_name.clone()
+                };
+                self.new_mail = Some((new.len(), sender, first.subject.clone()));
+            }
+        }
+        self.notify_seen = Some(self.notify_seen.unwrap_or(0).max(newest));
+    }
+
+    /// New mail to announce: (title, text) in the user's language.
+    pub fn take_notification(&mut self) -> Option<(String, String)> {
+        let (count, sender, subject) = self.new_mail.take()?;
+        let lang = Lang::resolve(self.settings.get().general.language);
+        let title = if count == 1 {
+            sender
+        } else {
+            format!("{count} {}", i18n::T::NewMessagesWord.get(lang))
+        };
+        Some((title, subject))
+    }
+
+    pub fn french(&self) -> bool {
+        Lang::resolve(self.settings.get().general.language) == Lang::Fr
+    }
+
+    /// Shows the first-launch assistant.
+    pub fn start_welcome(&mut self) {
+        self.view.dialog = Some(shell::Dialog::Welcome { step: 0 });
+    }
+
+    /// Keeps Windows in step with the start-up settings (real app only, never in tests).
+    fn apply_integrations(&mut self) {
+        let wanted = self.settings.get().startup.clone();
+        if !self.integrations || self.applied_startup.as_ref() == Some(&wanted) {
+            return;
+        }
+        if let Err(e) = startup::apply(wanted.with_windows, wanted.minimized) {
+            self.mail.status = Status::Error(format!("Windows start-up: {e}"));
+        }
+        self.applied_startup = Some(wanted);
     }
 
     /// Settings only, no mail backend (tests, or when the backend cannot start).
@@ -81,6 +190,10 @@ impl MailCraftApp {
             dirty: false,
             undo: Vec::new(),
             next_composer: 1,
+            integrations: false,
+            applied_startup: None,
+            notify_seen: None,
+            new_mail: None,
         }
     }
 
@@ -99,18 +212,7 @@ impl MailCraftApp {
             theme::apply(ui.ctx(), &prefs.appearance);
             self.applied = Some(prefs.appearance.clone());
         }
-        self.handle_events(ui.ctx());
-        if self.dirty {
-            self.dirty = false;
-            if let Some(b) = &self.backend
-                && let Err(e) = self.mail.reload(&b.store, &self.view.search)
-            {
-                self.mail.status = Status::Error(e.to_string());
-            }
-            if let Some((account_id, id)) = self.mail.wants_inline() {
-                self.send(Request::FetchInline { account_id, id });
-            }
-        }
+        self.background(ui.ctx());
 
         let mut next = prefs.clone();
         // Scoped: the context borrows the store and the mail only while the window is drawn.
@@ -123,6 +225,7 @@ impl MailCraftApp {
                 mail: &self.mail,
                 save_error: self.save_error.as_deref(),
                 block_images: prefs.privacy.block_remote_images,
+                screener: prefs.cleanup.screener,
                 suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
             };
             shell::show(ui, &c, &mut self.view, &mut next)
@@ -130,6 +233,7 @@ impl MailCraftApp {
         if next != prefs {
             self.settings.update(|p| *p = next);
         }
+        self.apply_integrations();
         for url in std::mem::take(&mut self.view.image_requests) {
             if self.mail.images_requested.insert(url.clone()) {
                 self.send(Request::FetchImage { url });
@@ -244,6 +348,24 @@ impl MailCraftApp {
                     self.view.composers.retain(|k| k.id != composer);
                     self.mail.status = Status::Sent;
                 }
+                Event::Analyzing { done, total } => self.mail.analyzing = Some((done, total)),
+                Event::AnalysisDone => {
+                    self.mail.analyzing = None;
+                    self.dirty = true;
+                }
+                Event::CleanupDone {
+                    done,
+                    skipped,
+                    dry_run,
+                } => {
+                    self.mail.status = Status::CleanupDone {
+                        done,
+                        skipped,
+                        dry_run,
+                    };
+                    self.dirty = true;
+                }
+                Event::OpenPage { url } => ctx.open_url(egui::OpenUrl::new_tab(url)),
                 Event::SendFailed { composer, error } => {
                     if let Some(k) = self.view.composers.iter_mut().find(|k| k.id == composer) {
                         k.sending = false;
@@ -380,6 +502,17 @@ impl MailCraftApp {
                     }
                 });
             }
+            cmd @ (Command::Screen { .. }
+            | Command::OpenOptions
+            | Command::CloseOptions
+            | Command::RebuildLocalCopy
+            | Command::RemoveAccount { .. }
+            | Command::OpenCleanup
+            | Command::CloseCleanup
+            | Command::Analyze { .. }
+            | Command::Cleanup { .. }
+            | Command::AllowSenders { .. }
+            | Command::SaveAllowList { .. }) => self.run_view(cmd),
             Command::SearchServer => {
                 if let Some((account_id, _)) = self.mail.folder.clone() {
                     self.mail.status = Status::SearchingServer;
@@ -615,6 +748,9 @@ impl MailCraftApp {
     }
 
     fn move_selection(&mut self, dest: &str) {
+        if dest == mail::SCREENER {
+            return;
+        }
         // Where each message comes from (search results mix folders); those already in `dest` stay.
         let from: Vec<(String, String)> = self
             .mail
@@ -887,6 +1023,7 @@ impl MailCraftApp {
                         mail,
                         save_error: None,
                         block_images: prefs.privacy.block_remote_images,
+                        screener: prefs.cleanup.screener,
                         suggest: suggest.map(|f| f as &shell::Suggest<'_>),
                     };
                     egui::CentralPanel::default().show(ui, |ui| {
@@ -956,7 +1093,15 @@ fn open_backend(ctx: &Context, prefs: &Prefs) -> Result<Backend, String> {
     let db_path = dir.join("mailcraft.db");
     let key = MasterKey::load_or_create().map_err(|e| e.to_string())?;
     let encrypt = prefs.privacy.encrypt_local_copy;
-    let store = Store::open(&db_path, key.clone(), encrypt).map_err(|e| e.to_string())?;
+    // Encryption switched in Options: rebuild the local copy (accounts and sessions kept).
+    let marker = dir.join("rebuild-local-copy");
+    let store = if marker.exists() {
+        let s = Store::recreate(&db_path, key.clone(), encrypt).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&marker);
+        s
+    } else {
+        Store::open(&db_path, key.clone(), encrypt).map_err(|e| e.to_string())?
+    };
     let client_id = match prefs.accounts.microsoft_client_id.trim() {
         "" => mailcraft_graph::auth::DEFAULT_CLIENT_ID.to_owned(),
         id => id.to_owned(),
@@ -991,5 +1136,129 @@ fn suggester(store: &Store) -> impl Fn(i64, &str) -> Vec<(String, String)> + '_ 
         store
             .address_suggestions(account, typed, 8)
             .unwrap_or_default()
+    }
+}
+
+impl MailCraftApp {
+    /// The account the user is looking at (its folder), else the first one.
+    fn current_account(&self) -> Option<i64> {
+        self.mail
+            .folder
+            .as_ref()
+            .map(|(a, _)| *a)
+            .or(self.mail.accounts.first().map(|a| a.id))
+    }
+}
+
+impl MailCraftApp {
+    /// Commands of the Options, clean-up and screener views.
+    fn run_view(&mut self, command: Command) {
+        match command {
+            Command::Screen { address, accept } => {
+                let Some(account_id) = self.current_account() else {
+                    return;
+                };
+                if let Some(b) = &self.backend
+                    && let Err(e) = b.store.set_screened(account_id, &address, accept)
+                {
+                    self.mail.status = Status::Error(e.to_string());
+                }
+                if !accept {
+                    let prefs = self.settings.get();
+                    let request = Request::Cleanup {
+                        account_id,
+                        addresses: vec![address],
+                        action: mailcraft_sync::CleanAction::Block,
+                        dry_run: prefs.cleanup.dry_run,
+                        protected: prefs.cleanup.allow_list.clone(),
+                    };
+                    self.send(request);
+                }
+                self.mail.message = None;
+                self.mail.selection.clear();
+                self.dirty = true;
+            }
+            Command::OpenOptions => {
+                self.view.options_open = true;
+                self.view.cleanup_open = false;
+            }
+            Command::CloseOptions => self.view.options_open = false,
+            Command::RebuildLocalCopy => {
+                let marker = craft_settings::paths::data_dir("mailcraft")
+                    .map(|d| d.join("rebuild-local-copy"));
+                match marker.map(|m| std::fs::write(m, b"")) {
+                    Some(Ok(())) => self.mail.status = Status::RebuildScheduled,
+                    Some(Err(e)) => self.mail.status = Status::Error(e.to_string()),
+                    None => {}
+                }
+            }
+            Command::RemoveAccount { account_id } => {
+                if let Some(b) = &self.backend
+                    && let Err(e) = b.store.delete_account(account_id)
+                {
+                    self.mail.status = Status::Error(e.to_string());
+                }
+                self.mail.folder = None;
+                self.mail.message = None;
+                self.dirty = true;
+            }
+            Command::OpenCleanup => {
+                self.view.cleanup_open = true;
+                self.view.options_open = false;
+                self.dirty = true;
+                if let Some(account_id) = self.current_account() {
+                    self.send(Request::AnalyzeSenders {
+                        account_id,
+                        force: false,
+                    });
+                }
+            }
+            Command::CloseCleanup => {
+                self.view.cleanup_open = false;
+                self.dirty = true;
+            }
+            Command::Analyze { force } => {
+                if let Some(account_id) = self.current_account() {
+                    self.send(Request::AnalyzeSenders { account_id, force });
+                }
+            }
+            Command::Cleanup { action, addresses } => {
+                if let Some(account_id) = self.current_account() {
+                    let prefs = self.settings.get();
+                    let request = Request::Cleanup {
+                        account_id,
+                        addresses,
+                        action,
+                        dry_run: prefs.cleanup.dry_run,
+                        protected: prefs.cleanup.allow_list.clone(),
+                    };
+                    self.send(request);
+                    self.view.cleanup.checked.clear();
+                }
+            }
+            Command::AllowSenders { addresses } => {
+                self.settings.update(|p| {
+                    for a in addresses {
+                        if !p
+                            .cleanup
+                            .allow_list
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(&a))
+                        {
+                            p.cleanup.allow_list.push(a);
+                        }
+                    }
+                });
+            }
+            Command::SaveAllowList { text } => {
+                let list: Vec<String> = text
+                    .lines()
+                    .map(|l| l.trim().trim_start_matches('@').to_lowercase())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.settings.update(|p| p.cleanup.allow_list = list);
+            }
+            _ => {}
+        }
     }
 }

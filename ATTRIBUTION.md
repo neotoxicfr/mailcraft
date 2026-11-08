@@ -1,7 +1,8 @@
 # Attribution
 
 Every file in `assets/` that MailCraft did not create, with its author, source and licence.
-Generated-in-code art is original and has no file to list: the UI icon set
+Generated-in-code art is original and has no file to list: the application icon
+(`apps/mailcraft/src/art.rs`, also turned into the .exe and installer icon by `build.rs`), the UI icon set
 (`crates/ui-egui/src/icons.rs`) and the theme colours (`crates/ui-egui/src/theme.rs`).
 
 | File | Author | Source | Licence | Notes |

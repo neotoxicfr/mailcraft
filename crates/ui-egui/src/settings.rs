@@ -42,6 +42,8 @@ pub struct Appearance {
 #[serde(default)]
 pub struct General {
     pub language: LangPref,
+    /// The welcome assistant was finished or skipped.
+    pub onboarded: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -92,9 +94,47 @@ pub struct Prefs {
     pub sync: Sync,
     pub privacy: Privacy,
     pub accounts: Accounts,
+    pub cleanup: Cleanup,
+    pub startup: Startup,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct Cleanup {
+    /// Clean-up actions are only logged (on until the user turns it off).
+    pub dry_run: bool,
+    /// Addresses or domains clean-up never touches.
+    pub allow_list: Vec<String>,
+    /// Screener: mail from senders never seen before waits in « À valider ».
+    pub screener: bool,
+    /// When the screener was turned on (unix seconds): only senders first seen after it count.
+    pub screener_since: i64,
+}
+
+impl Default for Cleanup {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            allow_list: Vec::new(),
+            screener: false,
+            screener_since: 0,
+        }
+    }
 }
 
 impl Settings for Prefs {
     const APP_ID: &'static str = "mailcraft";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Windows integration.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct Startup {
+    /// Start MailCraft when the user signs in to Windows.
+    pub with_windows: bool,
+    /// …in the notification area rather than as a window.
+    pub minimized: bool,
+    /// The close button hides the window to the notification area (mail keeps syncing).
+    pub close_to_tray: bool,
 }

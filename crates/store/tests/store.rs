@@ -312,3 +312,161 @@ fn address_suggestions_prefer_contacts_then_frequent_senders() {
     assert!(names("m").is_empty());
     assert!(names("%").is_empty());
 }
+
+#[test]
+fn senders_with_analysis_unsubscribe_and_log() {
+    use mailcraft_store::{ActionEntry, AiVerdict, SenderAnalysis};
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    s.upsert_account("microsoft", "user@example.com", "User", "t")
+        .unwrap();
+    s.replace_folders(1, &[folder("inbox", 0)]).unwrap();
+    let from = |id: &str, addr: &str, received: i64, read: bool| {
+        let mut m = msg(id, "inbox", received, "x");
+        m.from_addr = addr.into();
+        m.is_read = read;
+        m
+    };
+    let day = 24 * 3600;
+    s.apply_changes(
+        1,
+        "inbox",
+        &[
+            from("1", "news@shop.example", 10 * day, false),
+            from("2", "News@Shop.example", 20 * day, true),
+            from("3", "news@shop.example", 30 * day, false),
+            from("4", "friend@example.org", 5 * day, true),
+        ],
+        &[],
+    )
+    .unwrap();
+    let rows = s.senders(1).unwrap();
+    assert_eq!(rows.len(), 2, "case differences are the same sender");
+    assert_eq!(
+        (rows[0].count, rows[0].unread, rows[0].last),
+        (3, 2, 30 * day)
+    );
+    assert!(rows[0].analysis.is_none());
+    assert_eq!(
+        s.latest_from(1, "NEWS@shop.example").unwrap().as_deref(),
+        Some("3")
+    );
+
+    let a = SenderAnalysis {
+        mailto: Some("mailto:u@shop.example".into()),
+        spf: 1,
+        category: "newsletter".into(),
+        analyzed_at: 99,
+        ..Default::default()
+    };
+    s.put_sender_analysis(1, "news@shop.example", &a).unwrap();
+    s.put_ai_verdict(
+        1,
+        "news@shop.example",
+        &AiVerdict {
+            category: "promo".into(),
+            confidence: 0.9,
+            reason: "r".into(),
+            action: "desabonner".into(),
+        },
+    )
+    .unwrap();
+    s.mark_unsubscribed(1, "news@shop.example", 21 * day)
+        .unwrap();
+    s.mark_blocked(1, "friend@example.org").unwrap();
+    let rows = s.senders(1).unwrap();
+    assert_eq!(rows[0].analysis.as_ref(), Some(&a));
+    assert_eq!(
+        rows[0].ai.as_ref().map(|v| v.category.as_str()),
+        Some("promo")
+    );
+    // Unsubscribed on day 21, still mailed on day 30: more than a week later.
+    assert!(rows[0].still_writing);
+    assert!(rows[1].blocked && !rows[1].still_writing);
+
+    let entry = |action: &str| ActionEntry {
+        at: 1,
+        account_id: 1,
+        address: "news@shop.example".into(),
+        action: action.into(),
+        detail: String::new(),
+        dry_run: true,
+        ok: true,
+    };
+    s.log_action(&entry("unsubscribe")).unwrap();
+    s.log_action(&entry("delete-all")).unwrap();
+    assert_eq!(
+        s.actions_log(10)
+            .unwrap()
+            .iter()
+            .map(|e| e.action.as_str())
+            .collect::<Vec<_>>(),
+        ["delete-all", "unsubscribe"]
+    );
+}
+
+#[test]
+fn recreate_switches_encryption_and_keeps_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mail.db");
+    {
+        let mut s = Store::open(&path, key(), true).unwrap();
+        s.upsert_account("microsoft", "user@example.com", "User", "secret")
+            .unwrap();
+        s.replace_folders(1, &[folder("inbox", 0)]).unwrap();
+        s.apply_changes(1, "inbox", &[msg("a", "inbox", 1, "x")], &[])
+            .unwrap();
+    }
+    let s = Store::recreate(&path, key(), false).unwrap();
+    assert!(!s.is_encrypted());
+    assert_eq!(s.accounts().unwrap()[0].email, "user@example.com");
+    assert_eq!(s.refresh_token(1).unwrap().as_deref(), Some("secret"));
+    assert!(
+        s.folders(1).unwrap().is_empty(),
+        "mail comes back with the next sync"
+    );
+    drop(s);
+    assert_eq!(&std::fs::read(&path).unwrap()[..16], b"SQLite format 3\0");
+    let s = Store::recreate(&path, key(), true).unwrap();
+    assert!(s.is_encrypted());
+    s.delete_account(1).unwrap();
+    assert!(s.accounts().unwrap().is_empty());
+}
+
+#[test]
+fn screener_lists_new_undecided_senders_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    s.upsert_account("microsoft", "user@example.com", "User", "t")
+        .unwrap();
+    s.replace_folders(1, &[folder("inbox", 0)]).unwrap();
+    let from = |id: &str, addr: &str, received: i64| {
+        let mut m = msg(id, "inbox", received, "x");
+        m.from_addr = addr.into();
+        m
+    };
+    s.apply_changes(
+        1,
+        "inbox",
+        &[
+            from("1", "old@example.com", 50),
+            from("2", "old@example.com", 150),
+            from("3", "new@example.com", 120),
+            from("4", "other@example.com", 200),
+        ],
+        &[],
+    )
+    .unwrap();
+    let ids = |s: &Store| {
+        s.screening(1, "inbox", 100)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>()
+    };
+    // old@ wrote before the screener started (100): known sender.
+    assert_eq!(ids(&s), ["4", "3"]);
+    s.set_screened(1, "NEW@example.com", true).unwrap();
+    s.set_screened(1, "other@example.com", false).unwrap();
+    assert!(ids(&s).is_empty());
+}

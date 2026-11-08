@@ -43,6 +43,11 @@ pub struct View {
     pub image_requests: Vec<String>,
     /// Messages being written: in the reading pane, or in their own window when detached.
     pub composers: Vec<crate::composer::Composer>,
+    /// The clean-up view replaces the message list and reading pane.
+    pub cleanup_open: bool,
+    /// File › Options replaces the message list and reading pane.
+    pub options_open: bool,
+    pub cleanup: crate::cleanup::State,
 }
 
 /// Address completion: (account, typed text) → (name, address) pairs.
@@ -52,7 +57,9 @@ pub type Suggest<'a> = dyn Fn(i64, &str) -> Vec<(String, String)> + 'a;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dialog {
     /// Permanent deletion of the selected messages.
-    ConfirmPermanentDelete { count: usize },
+    ConfirmPermanentDelete {
+        count: usize,
+    },
     /// New folder under `parent` (top level when `None`), or rename of `rename`.
     FolderName {
         account_id: i64,
@@ -66,7 +73,27 @@ pub enum Dialog {
         name: String,
     },
     /// Signature of one account, edited as plain text.
-    Signature { email: String, text: String },
+    Signature {
+        email: String,
+        text: String,
+    },
+    /// Allow-list of the clean-up view, one address or domain per line.
+    AllowList {
+        text: String,
+    },
+    ConfirmRemoveAccount {
+        account_id: i64,
+        email: String,
+    },
+    /// First-launch assistant, at step 0..WELCOME_STEPS.
+    Welcome {
+        step: u8,
+    },
+    /// A real (not simulated) clean-up action, confirmed first.
+    ConfirmCleanup {
+        action: mailcraft_sync::CleanAction,
+        addresses: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -126,6 +153,35 @@ pub enum Command {
         email: String,
         text: String,
     },
+    /// Opens the clean-up view and analyses senders not analysed yet.
+    OpenCleanup,
+    CloseCleanup,
+    Analyze {
+        force: bool,
+    },
+    Cleanup {
+        action: mailcraft_sync::CleanAction,
+        addresses: Vec<String>,
+    },
+    AllowSenders {
+        addresses: Vec<String>,
+    },
+    SaveAllowList {
+        text: String,
+    },
+    /// Screener decision on a new sender.
+    Screen {
+        address: String,
+        accept: bool,
+    },
+    OpenOptions,
+    CloseOptions,
+    /// Rebuild the local copy at next start (encryption switched on or off).
+    RebuildLocalCopy,
+    RemoveAccount {
+        account_id: i64,
+    },
+
     /// Selected messages to Deleted Items, or for good when `permanent` (already confirmed).
     Delete {
         permanent: bool,
@@ -161,6 +217,8 @@ pub struct Ctx<'a> {
     pub save_error: Option<&'a str>,
     /// Remote images stay blocked (tracker blocker on).
     pub block_images: bool,
+    /// The screener is on (« À valider » shown).
+    pub screener: bool,
     /// Address completion: (account, typed text) → (name, address).
     pub suggest: Option<&'a Suggest<'a>>,
 }
@@ -207,18 +265,44 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
         .show(ui, |ui| {
             panes::folder_pane(ui, c, &mut view.dialog, &mut pane_command)
         });
-    Panel::left("list")
-        .resizable(true)
-        .default_size(400.0)
-        .size_range(260.0..=700.0)
-        .frame(pane_frame(ui))
-        .show(ui, |ui| {
-            panes::message_list(ui, c, view, dark, &mut pane_command)
-        });
-    CentralPanel::default()
-        .frame(pane_frame(ui))
-        .show(ui, |ui| panes::reading_pane(ui, c, view, &mut pane_command));
-    let dialog_command = dialog(ui.ctx(), c, &mut view.dialog);
+    if view.options_open {
+        CentralPanel::default()
+            .frame(pane_frame(ui))
+            .show(ui, |ui| {
+                if let Some(cmd) = crate::options::show(ui, c, prefs, &mut view.dialog) {
+                    pane_command = Some(cmd);
+                }
+            });
+    } else if view.cleanup_open {
+        let allow = prefs.cleanup.allow_list.clone();
+        CentralPanel::default()
+            .frame(pane_frame(ui))
+            .show(ui, |ui| {
+                if let Some(cmd) = crate::cleanup::show(
+                    ui,
+                    c,
+                    &mut view.cleanup,
+                    &mut prefs.cleanup.dry_run,
+                    &allow,
+                    &mut view.dialog,
+                ) {
+                    pane_command = Some(cmd);
+                }
+            });
+    } else {
+        Panel::left("list")
+            .resizable(true)
+            .default_size(400.0)
+            .size_range(260.0..=700.0)
+            .frame(pane_frame(ui))
+            .show(ui, |ui| {
+                panes::message_list(ui, c, view, dark, &mut pane_command)
+            });
+        CentralPanel::default()
+            .frame(pane_frame(ui))
+            .show(ui, |ui| panes::reading_pane(ui, c, view, &mut pane_command));
+    }
+    let dialog_command = dialog(ui.ctx(), c, &mut view.dialog, prefs);
     let key_command = if view.dialog.is_none() {
         keys(ui.ctx(), c, &mut view.dialog)
     } else {
@@ -278,7 +362,12 @@ fn keys(ctx: &egui::Context, c: &Ctx<'_>, dialog: &mut Option<Dialog>) -> Option
     })
 }
 
-fn dialog(ctx: &egui::Context, c: &Ctx<'_>, state: &mut Option<Dialog>) -> Option<Command> {
+fn dialog(
+    ctx: &egui::Context,
+    c: &Ctx<'_>,
+    state: &mut Option<Dialog>,
+    prefs: &mut Prefs,
+) -> Option<Command> {
     let lang = c.lang;
     let current = state.clone()?;
     let mut result = None;
@@ -346,6 +435,177 @@ fn dialog(ctx: &egui::Context, c: &Ctx<'_>, state: &mut Option<Dialog>) -> Optio
                     }
                 });
             }
+            Dialog::ConfirmRemoveAccount { account_id, email } => {
+                ui.heading(T::RemoveAccount.get(lang));
+                ui.label(RichText::new(email).strong());
+                ui.label(T::ConfirmRemoveAccountBody.get(lang));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::RemoveAccount.get(lang)).clicked() {
+                        result = Some(Command::RemoveAccount {
+                            account_id: *account_id,
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
+            Dialog::Welcome { step } => {
+                let step = *step;
+                let titles = [
+                    T::WelcomeTitle,
+                    T::WelcomePrivacy,
+                    T::WelcomeCleanup,
+                    T::WelcomeStartup,
+                    T::WelcomeAccount,
+                ];
+                ui.label(
+                    RichText::new(format!(
+                        "{} {} / {}",
+                        T::StepWord.get(lang),
+                        step + 1,
+                        titles.len()
+                    ))
+                    .weak(),
+                );
+                ui.heading(titles[usize::from(step)].get(lang));
+                ui.add_space(6.0);
+                match step {
+                    0 => {
+                        ui.label(T::WelcomeIntro.get(lang));
+                        ui.add_space(6.0);
+                        appearance_controls(ui, lang, prefs);
+                    }
+                    1 => {
+                        ui.checkbox(
+                            &mut prefs.privacy.encrypt_local_copy,
+                            T::EncryptLocalCopy.get(lang),
+                        );
+                        ui.checkbox(
+                            &mut prefs.privacy.block_remote_images,
+                            T::BlockRemoteImages.get(lang),
+                        );
+                        ui.label(
+                            RichText::new(T::BlockRemoteImagesHelp.get(lang))
+                                .small()
+                                .weak(),
+                        );
+                    }
+                    2 => {
+                        ui.checkbox(&mut prefs.cleanup.dry_run, T::DryRun.get(lang));
+                        ui.label(RichText::new(T::DryRunHelp.get(lang)).small().weak());
+                        let was = prefs.cleanup.screener;
+                        ui.checkbox(&mut prefs.cleanup.screener, T::Screener.get(lang));
+                        if prefs.cleanup.screener && !was {
+                            prefs.cleanup.screener_since = chrono::Utc::now().timestamp();
+                        }
+                        ui.label(RichText::new(T::ScreenerHelp.get(lang)).small().weak());
+                    }
+                    3 => {
+                        ui.checkbox(
+                            &mut prefs.startup.with_windows,
+                            T::StartWithWindows.get(lang),
+                        );
+                        ui.add_enabled(
+                            prefs.startup.with_windows,
+                            egui::Checkbox::new(
+                                &mut prefs.startup.minimized,
+                                T::StartMinimized.get(lang),
+                            ),
+                        );
+                        ui.checkbox(&mut prefs.startup.close_to_tray, T::CloseToTray.get(lang));
+                    }
+                    _ => {
+                        if c.mail.accounts.is_empty() {
+                            if ui
+                                .button(T::AddAccount.get(lang).replace('\n', " "))
+                                .clicked()
+                            {
+                                result = Some(Command::AddAccount);
+                                prefs.general.onboarded = true;
+                                close = true;
+                            }
+                        } else {
+                            for a in &c.mail.accounts {
+                                ui.label(RichText::new(&a.email).strong());
+                            }
+                        }
+                    }
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if step > 0 && ui.button(T::Previous.get(lang)).clicked() {
+                        *state = Some(Dialog::Welcome { step: step - 1 });
+                    }
+                    let last = usize::from(step) + 1 == titles.len();
+                    let next = if last { T::Finish } else { T::Next };
+                    if ui.button(next.get(lang)).clicked() {
+                        if last {
+                            prefs.general.onboarded = true;
+                            close = true;
+                        } else {
+                            *state = Some(Dialog::Welcome { step: step + 1 });
+                        }
+                    }
+                    if !last && ui.button(T::Skip.get(lang)).clicked() {
+                        prefs.general.onboarded = true;
+                        close = true;
+                    }
+                });
+            }
+            Dialog::AllowList { text } => {
+                ui.heading(T::AllowList.get(lang).trim_end_matches('…'));
+                ui.label(T::AllowListHelp.get(lang));
+                let mut edited = text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut edited)
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("impots.gouv.fr\nmabanque.fr\npatron@example.com"),
+                );
+                if let Some(Dialog::AllowList { text }) = state.as_mut() {
+                    *text = edited.clone();
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(T::Ok.get(lang)).clicked() {
+                        result = Some(Command::SaveAllowList {
+                            text: edited.clone(),
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
+            Dialog::ConfirmCleanup { action, addresses } => {
+                ui.heading(T::ConfirmCleanupTitle.get(lang));
+                ui.label(format!(
+                    "{} — {}",
+                    cleanup_label(*action).get(lang).replace('\n', " "),
+                    addresses.len()
+                ));
+                ui.label(T::ConfirmCleanupBody.get(lang));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(cleanup_label(*action).get(lang).replace('\n', " "))
+                        .clicked()
+                    {
+                        result = Some(Command::Cleanup {
+                            action: *action,
+                            addresses: addresses.clone(),
+                        });
+                        close = true;
+                    }
+                    if ui.button(T::Cancel.get(lang)).clicked() {
+                        close = true;
+                    }
+                });
+            }
             Dialog::Signature { email, text } => {
                 ui.heading(T::Signature.get(lang));
                 ui.label(RichText::new(email).weak());
@@ -398,6 +658,10 @@ fn dialog(ctx: &egui::Context, c: &Ctx<'_>, state: &mut Option<Dialog>) -> Optio
             }
         }
     });
+    if modal.should_close() && matches!(current, Dialog::Welcome { .. }) {
+        // Escape or a click outside counts as « Skip ».
+        prefs.general.onboarded = true;
+    }
     if close || modal.should_close() {
         *state = None;
     }
@@ -488,6 +752,9 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                         text,
                     });
                 }
+                if big_button(ui, c, Icon::Gear, T::Options, true, "").clicked() {
+                    command = Some(Command::OpenOptions);
+                }
                 if big_button(ui, c, Icon::Exit, T::Exit, true, "").clicked() {
                     command = Some(Command::Exit);
                 }
@@ -575,8 +842,49 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                 });
             });
             group(ui, c, T::GroupSort, |ui| {
-                big_button(ui, c, Icon::Unsubscribe, T::Unsubscribe, false, later);
-                big_button(ui, c, Icon::Analyze, T::Analyze, false, later);
+                // From the mail view: the sender of the selected message.
+                let sender = c
+                    .mail
+                    .selected()
+                    .map(|m| m.from_addr.clone())
+                    .filter(|a| !a.is_empty());
+                if big_button(
+                    ui,
+                    c,
+                    Icon::Unsubscribe,
+                    T::Unsubscribe,
+                    sender.is_some(),
+                    pick_first,
+                )
+                .clicked()
+                    && let Some(address) = sender
+                {
+                    let action = mailcraft_sync::CleanAction::Unsubscribe;
+                    if prefs.cleanup.dry_run {
+                        command = Some(Command::Cleanup {
+                            action,
+                            addresses: vec![address],
+                        });
+                    } else {
+                        view.dialog = Some(Dialog::ConfirmCleanup {
+                            action,
+                            addresses: vec![address],
+                        });
+                    }
+                }
+                let can = !c.mail.accounts.is_empty();
+                if big_button(
+                    ui,
+                    c,
+                    Icon::Analyze,
+                    T::Analyze,
+                    can,
+                    T::StatusNoAccount.get(lang),
+                )
+                .clicked()
+                {
+                    command = Some(Command::OpenCleanup);
+                }
             });
         }
         Tab::SendReceive => {
@@ -693,7 +1001,7 @@ pub fn folder_menu(ui: &mut Ui, c: &Ctx<'_>, account_id: i64) -> Option<Command>
     command
 }
 
-fn appearance_controls(ui: &mut Ui, lang: Lang, prefs: &mut Prefs) {
+pub fn appearance_controls(ui: &mut Ui, lang: Lang, prefs: &mut Prefs) {
     egui::Grid::new("appearance")
         .num_columns(2)
         .spacing([8.0, 4.0])
@@ -931,5 +1239,15 @@ fn with_tip(response: egui::Response, label: &str, enabled: bool, tip: &str) -> 
         response
     } else {
         response.on_hover_text(tip)
+    }
+}
+
+fn cleanup_label(action: mailcraft_sync::CleanAction) -> T {
+    use mailcraft_sync::CleanAction;
+    match action {
+        CleanAction::Unsubscribe => T::Unsubscribe,
+        CleanAction::DeleteAll => T::DeleteAll,
+        CleanAction::ArchiveAll => T::ArchiveAll,
+        CleanAction::Block => T::Block,
     }
 }

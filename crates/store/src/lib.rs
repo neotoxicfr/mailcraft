@@ -102,6 +102,58 @@ pub struct MessageBody {
     pub cc: String,
 }
 
+/// What the local analysis found about a sender (from the headers of its latest message).
+/// Checks: 0 unknown, 1 pass, 2 fail. `warnings`: comma-separated codes.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SenderAnalysis {
+    pub one_click: Option<String>,
+    pub mailto: Option<String>,
+    pub web: Option<String>,
+    pub spf: i64,
+    pub dkim: i64,
+    pub dmarc: i64,
+    pub warnings: String,
+    pub category: String,
+    pub analyzed_at: i64,
+    /// The headers the analysis used ("Name: value" lines), to analyse again offline.
+    pub headers: String,
+}
+
+/// Claude's opinion of a sender.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct AiVerdict {
+    pub category: String,
+    pub confidence: f64,
+    pub reason: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SenderRow {
+    pub address: String,
+    pub name: String,
+    pub count: i64,
+    pub unread: i64,
+    pub last: i64,
+    pub analysis: Option<SenderAnalysis>,
+    pub unsubscribed_at: Option<i64>,
+    pub blocked: bool,
+    pub ai: Option<AiVerdict>,
+    /// Still sending a week after the unsubscribe.
+    pub still_writing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionEntry {
+    pub at: i64,
+    pub account_id: i64,
+    pub address: String,
+    pub action: String,
+    pub detail: String,
+    pub dry_run: bool,
+    pub ok: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attachment {
     pub id: String,
@@ -289,7 +341,255 @@ impl Store {
                 COMMIT;",
             )?;
         }
+        if version < 6 {
+            // Clean-up: what was learnt about each sender, and every action taken (or simulated).
+            self.conn.execute_batch(
+                "BEGIN;
+                CREATE TABLE senders (
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    address TEXT NOT NULL COLLATE NOCASE,
+                    unsub_one_click TEXT,
+                    unsub_mailto TEXT,
+                    unsub_web TEXT,
+                    spf INTEGER NOT NULL DEFAULT 0,
+                    dkim INTEGER NOT NULL DEFAULT 0,
+                    dmarc INTEGER NOT NULL DEFAULT 0,
+                    warnings TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT '',
+                    analyzed_at INTEGER,
+                    unsubscribed_at INTEGER,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    ai_category TEXT,
+                    ai_confidence REAL,
+                    ai_reason TEXT,
+                    ai_action TEXT,
+                    PRIMARY KEY (account_id, address)
+                );
+                CREATE TABLE actions_log (
+                    id INTEGER PRIMARY KEY,
+                    at INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL,
+                    ok INTEGER NOT NULL
+                );
+                CREATE INDEX messages_by_sender ON messages(account_id, from_addr COLLATE NOCASE);
+                PRAGMA user_version = 6;
+                COMMIT;",
+            )?;
+        }
+        if version < 7 {
+            self.conn.execute_batch(
+                "BEGIN;
+                ALTER TABLE senders ADD COLUMN headers TEXT;
+                PRAGMA user_version = 7;
+                COMMIT;",
+            )?;
+        }
+        if version < 8 {
+            // Screener decision: NULL not decided, 1 accepted, 0 refused.
+            self.conn.execute_batch(
+                "BEGIN;
+                ALTER TABLE senders ADD COLUMN screened INTEGER;
+                PRAGMA user_version = 8;
+                COMMIT;",
+            )?;
+        }
         Ok(())
+    }
+
+    // ---- clean-up ----
+
+    /// Every sender of the account with its numbers and what is known about it, most mail first.
+    pub fn senders(&self, account_id: i64) -> Result<Vec<SenderRow>> {
+        const WEEK: i64 = 7 * 24 * 3600;
+        let mut st = self.conn.prepare(
+            "SELECT m.from_addr, MAX(m.from_name), COUNT(*), SUM(1 - m.is_read), MAX(m.received),
+                    s.unsub_one_click, s.unsub_mailto, s.unsub_web, s.spf, s.dkim, s.dmarc, s.warnings,
+                    s.category, s.analyzed_at, s.unsubscribed_at, COALESCE(s.blocked, 0),
+                    s.ai_category, s.ai_confidence, s.ai_reason, s.ai_action,
+                    s.unsubscribed_at IS NOT NULL AND MAX(m.received) > s.unsubscribed_at + ?2,
+                    s.headers
+             FROM messages m
+             LEFT JOIN senders s ON s.account_id = m.account_id AND s.address = m.from_addr
+             WHERE m.account_id = ?1 AND m.from_addr != ''
+             GROUP BY m.from_addr COLLATE NOCASE
+             ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = st.query_map(params![account_id, WEEK], |r| {
+            let analyzed: Option<i64> = r.get(13)?;
+            Ok(SenderRow {
+                address: r.get(0)?,
+                name: r.get(1)?,
+                count: r.get(2)?,
+                unread: r.get(3)?,
+                last: r.get(4)?,
+                analysis: match analyzed {
+                    Some(at) => Some(SenderAnalysis {
+                        one_click: r.get(5)?,
+                        mailto: r.get(6)?,
+                        web: r.get(7)?,
+                        spf: r.get(8)?,
+                        dkim: r.get(9)?,
+                        dmarc: r.get(10)?,
+                        warnings: r.get(11)?,
+                        category: r.get(12)?,
+                        analyzed_at: at,
+                        headers: r.get::<_, Option<String>>(21)?.unwrap_or_default(),
+                    }),
+                    None => None,
+                },
+                unsubscribed_at: r.get(14)?,
+                blocked: r.get(15)?,
+                ai: match r.get::<_, Option<String>>(16)? {
+                    Some(category) => Some(AiVerdict {
+                        category,
+                        confidence: r.get(17)?,
+                        reason: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
+                        action: r.get::<_, Option<String>>(19)?.unwrap_or_default(),
+                    }),
+                    None => None,
+                },
+                still_writing: r.get(20)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Latest message of a sender (to read its headers).
+    pub fn latest_from(&self, account_id: i64, address: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM messages WHERE account_id = ?1 AND from_addr = ?2 COLLATE NOCASE
+                 ORDER BY received DESC LIMIT 1",
+                params![account_id, address],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn put_sender_analysis(
+        &self,
+        account_id: i64,
+        address: &str,
+        a: &SenderAnalysis,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO senders (account_id, address, unsub_one_click, unsub_mailto, unsub_web, spf, dkim, dmarc,
+                warnings, category, analyzed_at, headers)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(account_id, address) DO UPDATE SET unsub_one_click = excluded.unsub_one_click,
+                unsub_mailto = excluded.unsub_mailto, unsub_web = excluded.unsub_web, spf = excluded.spf,
+                dkim = excluded.dkim, dmarc = excluded.dmarc, warnings = excluded.warnings,
+                category = excluded.category, analyzed_at = excluded.analyzed_at, headers = excluded.headers",
+            params![
+                account_id,
+                address,
+                a.one_click,
+                a.mailto,
+                a.web,
+                a.spf,
+                a.dkim,
+                a.dmarc,
+                a.warnings,
+                a.category,
+                a.analyzed_at,
+                a.headers
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_ai_verdict(&self, account_id: i64, address: &str, v: &AiVerdict) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO senders (account_id, address, ai_category, ai_confidence, ai_reason, ai_action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, address) DO UPDATE SET ai_category = excluded.ai_category,
+                ai_confidence = excluded.ai_confidence, ai_reason = excluded.ai_reason, ai_action = excluded.ai_action",
+            params![account_id, address, v.category, v.confidence, v.reason, v.action],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_unsubscribed(&self, account_id: i64, address: &str, at: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO senders (account_id, address, unsubscribed_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id, address) DO UPDATE SET unsubscribed_at = excluded.unsubscribed_at",
+            params![account_id, address, at],
+        )?;
+        Ok(())
+    }
+
+    /// Screener: accept (`true`) or refuse a new sender, once and for all.
+    pub fn set_screened(&self, account_id: i64, address: &str, accepted: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO senders (account_id, address, screened) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id, address) DO UPDATE SET screened = excluded.screened",
+            params![account_id, address, accepted],
+        )?;
+        Ok(())
+    }
+
+    /// Screener: messages in `folder_id` from senders first seen at or after `since` and not
+    /// decided yet, newest first.
+    pub fn screening(
+        &self,
+        account_id: i64,
+        folder_id: &str,
+        since: i64,
+    ) -> Result<Vec<MessageSummary>> {
+        let mut st = self.conn.prepare(
+            "SELECT m.account_id, m.id, m.folder_id, m.from_name, m.from_addr, m.subject, m.preview,
+                    m.received, m.is_read, m.has_attachments, m.flagged
+             FROM messages m
+             JOIN (SELECT from_addr AS a, MIN(received) AS first FROM messages
+                   WHERE account_id = ?1 GROUP BY from_addr COLLATE NOCASE) f
+               ON f.a = m.from_addr COLLATE NOCASE
+             LEFT JOIN senders s ON s.account_id = m.account_id AND s.address = m.from_addr
+             WHERE m.account_id = ?1 AND m.folder_id = ?2 AND f.first >= ?3 AND s.screened IS NULL
+             ORDER BY m.received DESC",
+        )?;
+        let rows = st.query_map(params![account_id, folder_id, since], summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mark_blocked(&self, account_id: i64, address: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO senders (account_id, address, blocked) VALUES (?1, ?2, 1)
+             ON CONFLICT(account_id, address) DO UPDATE SET blocked = 1",
+            params![account_id, address],
+        )?;
+        Ok(())
+    }
+
+    pub fn log_action(&self, entry: &ActionEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO actions_log (at, account_id, address, action, detail, dry_run, ok) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![entry.at, entry.account_id, entry.address, entry.action, entry.detail, entry.dry_run, entry.ok],
+        )?;
+        Ok(())
+    }
+
+    /// Newest first.
+    pub fn actions_log(&self, limit: usize) -> Result<Vec<ActionEntry>> {
+        let mut st = self.conn.prepare(
+            "SELECT at, account_id, address, action, detail, dry_run, ok FROM actions_log ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = st.query_map([limit as i64], |r| {
+            Ok(ActionEntry {
+                at: r.get(0)?,
+                account_id: r.get(1)?,
+                address: r.get(2)?,
+                action: r.get(3)?,
+                detail: r.get(4)?,
+                dry_run: r.get(5)?,
+                ok: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn replace_contacts(
@@ -412,6 +712,49 @@ impl Store {
             params![provider, email],
             |r| r.get(0),
         )?)
+    }
+
+    /// Removes an account and everything stored for it (folders, messages, bodies, contacts,
+    /// clean-up data, pending changes). The action log stays.
+    pub fn delete_account(&self, account_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM accounts WHERE id = ?1", [account_id])?;
+        Ok(())
+    }
+
+    /// Rebuilds the local copy from scratch (to switch encryption on or off): accounts and their
+    /// sessions are kept, the mail is fetched again by the next sync. The store must not be open
+    /// elsewhere.
+    pub fn recreate(path: &Path, key: MasterKey, encrypt: bool) -> Result<Self> {
+        let accounts: Vec<(Account, Option<String>)> = {
+            let old = Self::open(path, key.clone(), encrypt)?;
+            old.accounts()?
+                .into_iter()
+                .map(|a| {
+                    let token = old.refresh_token(a.id).ok().flatten();
+                    (a, token)
+                })
+                .collect()
+        };
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            match std::fs::remove_file(&p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        let new = Self::open(path, key, encrypt)?;
+        for (a, token) in accounts {
+            new.upsert_account(
+                &a.provider,
+                &a.email,
+                &a.name,
+                token.as_deref().unwrap_or(""),
+            )?;
+        }
+        Ok(new)
     }
 
     pub fn accounts(&self) -> Result<Vec<Account>> {
