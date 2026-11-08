@@ -22,7 +22,11 @@ open = { workspace = true }
 tray-icon = "0.26"
 tauri-winrt-notification = "0.8"
 
+[build-dependencies]
+# Renders assets/app-icon/mailcraft.svg (pure Rust).
+resvg = "0.49"
+
 [target.'cfg(windows)'.build-dependencies]
-# Icon + VERSIONINFO for mailcraft.exe, drawn by src/art.rs at build time.
+# Icon + VERSIONINFO for mailcraft.exe.
 winresource = "0.1"
 ico = "0.6"

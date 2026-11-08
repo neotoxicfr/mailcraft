@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- MailCraft app icon: an open envelope with a letter coming out (original work,
+       MIT OR Apache-2.0), in the suite's placeholder idiom (ink and paper on the app colour). Ink #0b0b0c,
+       paper #efe9dc, MailCraft teal #0e8074. -->
+  <defs><clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath></defs>
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="#0e8074"/>
+    <g transform="rotate(-6 256 268)" stroke="#0b0b0c" stroke-linejoin="round" stroke-linecap="round">
+      <!-- open flap, behind -->
+      <path d="M96 214 L256 104 L416 214 Z" fill="#efe9dc" stroke-width="14"/>
+      <!-- the letter -->
+      <path d="M140 128 H372 V340 H140 Z" fill="#efe9dc" stroke-width="14"/>
+      <path d="M172 166 H300 M172 196 H340 M172 226 H316 M172 256 H332" stroke-width="12"/>
+      <path d="M172 166 H300" stroke="#0e8074" stroke-width="12"/>
+      <!-- the pocket -->
+      <path d="M96 214 L256 320 L416 214 V418 H96 Z" fill="#efe9dc" stroke-width="14"/>
+      <path d="M96 418 L214 306 M416 418 L298 306" fill="none" stroke-width="10"/>
+    </g>
+  </g>
+</svg>
