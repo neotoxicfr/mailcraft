@@ -166,6 +166,10 @@ impl MailCraftApp {
                 }
                 Event::Changed | Event::BodyReady { .. } => self.dirty = true,
                 Event::Offline { pending, .. } => self.mail.status = Status::Offline { pending },
+                Event::ServerSearchDone { found } => {
+                    self.mail.status = Status::ServerFound(found);
+                    self.dirty = true;
+                }
                 Event::Error(e) => {
                     self.mail.signing_in = false;
                     self.mail.status = Status::Error(e);
@@ -237,6 +241,15 @@ impl MailCraftApp {
                 }
             }
             Command::SearchChanged => self.dirty = true,
+            Command::SearchServer => {
+                if let Some((account_id, _)) = self.mail.folder.clone() {
+                    self.mail.status = Status::SearchingServer;
+                    self.send(Request::SearchServer {
+                        account_id,
+                        query: self.view.search.clone(),
+                    });
+                }
+            }
             Command::Delete { permanent } => {
                 let in_trash = self.mail.current_folder().and_then(|f| f.role.as_deref())
                     == Some("deleteditems");
@@ -463,18 +476,24 @@ impl MailCraftApp {
     }
 
     fn move_selection(&mut self, dest: &str) {
-        let Some(from) = self.mail.folder.as_ref().map(|(_, f)| f.clone()) else {
-            return;
-        };
-        if from == dest {
+        // Where each message comes from (search results mix folders); those already in `dest` stay.
+        let from: Vec<(String, String)> = self
+            .mail
+            .selected_messages()
+            .iter()
+            .filter(|m| m.folder_id != dest)
+            .map(|m| (m.id.clone(), m.folder_id.clone()))
+            .collect();
+        if from.is_empty() {
             return;
         }
-        let Some((account_id, ids)) = self.take_selection() else {
+        let Some((account_id, _)) = self.take_selection() else {
             return;
         };
+        let ids = from.iter().map(|(id, _)| id.clone()).collect();
         self.undo.push(Undo {
             account_id,
-            moves: ids.iter().map(|id| (id.clone(), from.clone())).collect(),
+            moves: from,
         });
         if self.undo.len() > 50 {
             self.undo.remove(0);

@@ -225,6 +225,22 @@ pub fn message_list(
     if search.changed() {
         *command = Some(Command::SearchChanged);
     }
+    if (search.has_focus() || search.lost_focus())
+        && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        && !view.search.is_empty()
+    {
+        view.search.clear();
+        *command = Some(Command::SearchChanged);
+    }
+    if c.mail.searching {
+        let enabled = c.mail.status != Status::SearchingServer;
+        if ui
+            .add_enabled(enabled, egui::Link::new(T::SearchServer.get(c.lang)))
+            .clicked()
+        {
+            *command = Some(Command::SearchServer);
+        }
+    }
     ui.add_space(4.0);
     let rect = ui.available_rect_before_wrap();
     ui.painter().hline(
@@ -380,13 +396,17 @@ fn message_row(
     );
     ui.painter()
         .galley(pos2(left, rect.top() + 23.0), sub, subject_color);
-    let pre = one_line(
-        ui,
-        &m.preview,
-        FontId::proportional(12.0),
-        weak,
-        right - left,
-    );
+    // Search results come from every folder: say which one.
+    let third = if c.mail.searching {
+        format!(
+            "{} · {}",
+            c.mail.folder_name(m.account_id, &m.folder_id),
+            m.preview
+        )
+    } else {
+        m.preview.clone()
+    };
+    let pre = one_line(ui, &third, FontId::proportional(12.0), weak, right - left);
     ui.painter()
         .galley(pos2(left, rect.top() + 40.0), pre, weak);
 
@@ -599,6 +619,12 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
                     T::Syncing.get(lang),
                     T::MessagesWord.get(lang)
                 )));
+            }
+            Status::SearchingServer => {
+                ui.label(small(T::SearchingServer.get(lang).into()));
+            }
+            Status::ServerFound(n) => {
+                ui.label(small(format!("{n} {}", T::ServerFound.get(lang))));
             }
             Status::UpToDate => {
                 ui.label(small(T::UpToDate.get(lang).into()));

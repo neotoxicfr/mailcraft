@@ -252,6 +252,22 @@ impl<'a> Graph<'a> {
         })
     }
 
+    /// Searches the whole mailbox on the server (older mail included): (folder id, message).
+    pub fn search(&self, query: &str, top: usize) -> Result<Vec<(String, RemoteMessage)>> {
+        let v = self.get(&search_url(query, top))?;
+        Ok(v["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                (
+                    m["parentFolderId"].as_str().unwrap_or("").to_owned(),
+                    parse_message(m),
+                )
+            })
+            .collect())
+    }
+
     /// Creates a folder under `parent` (top level when `None`).
     pub fn create_folder(&self, parent: Option<&str>, name: &str) -> Result<RemoteFolder> {
         let v = self.apply(&Op::CreateFolder { parent, name })?;
@@ -372,23 +388,38 @@ fn parse_delta(v: &Value) -> DeltaPage {
             page.removed.push(id);
             continue;
         }
-        let from = &m["from"]["emailAddress"];
-        page.messages.push(RemoteMessage {
-            id,
-            from_name: from["name"].as_str().unwrap_or("").to_owned(),
-            from_addr: from["address"].as_str().unwrap_or("").to_owned(),
-            subject: m["subject"].as_str().unwrap_or("").to_owned(),
-            preview: m["bodyPreview"].as_str().unwrap_or("").to_owned(),
-            received: m["receivedDateTime"]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map_or(0, |d| d.timestamp()),
-            is_read: m["isRead"].as_bool().unwrap_or(true),
-            has_attachments: m["hasAttachments"].as_bool().unwrap_or(false),
-            flagged: m["flag"]["flagStatus"] == "flagged",
-        });
+        page.messages.push(parse_message(m));
     }
     page
+}
+
+fn parse_message(m: &Value) -> RemoteMessage {
+    let from = &m["from"]["emailAddress"];
+    RemoteMessage {
+        id: m["id"].as_str().unwrap_or("").to_owned(),
+        from_name: from["name"].as_str().unwrap_or("").to_owned(),
+        from_addr: from["address"].as_str().unwrap_or("").to_owned(),
+        subject: m["subject"].as_str().unwrap_or("").to_owned(),
+        preview: m["bodyPreview"].as_str().unwrap_or("").to_owned(),
+        received: m["receivedDateTime"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map_or(0, |d| d.timestamp()),
+        is_read: m["isRead"].as_bool().unwrap_or(true),
+        has_attachments: m["hasAttachments"].as_bool().unwrap_or(false),
+        flagged: m["flag"]["flagStatus"] == "flagged",
+    }
+}
+
+/// `$search` value: the user's words as one quoted KQL phrase-free term list.
+fn search_url(query: &str, top: usize) -> String {
+    let words: Vec<&str> = query
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let q = url::form_urlencoded::byte_serialize(format!("\"{}\"", words.join(" ")).as_bytes())
+        .collect::<String>();
+    format!("{GRAPH}/me/messages?$search={q}&$top={top}&$select={MESSAGE_FIELDS},parentFolderId")
 }
 
 #[cfg(test)]
@@ -422,6 +453,16 @@ mod tests {
             (m.from_addr.as_str(), m.received, m.is_read, m.flagged),
             ("billing@example.com", 1_794_130_200, false, true)
         );
+    }
+
+    #[test]
+    fn search_url_quotes_the_words() {
+        let url = super::search_url("  facture \"EDF\"  2026 ", 50);
+        assert!(
+            url.contains("$search=%22facture+EDF+2026%22&$top=50"),
+            "{url}"
+        );
+        assert!(url.ends_with(",parentFolderId"));
     }
 
     #[test]

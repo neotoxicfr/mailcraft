@@ -187,3 +187,23 @@ fn shift_delete_asks_before_deleting_for_good() {
     h.run();
     assert!(h.query_by_label("Example Shop — Promo").is_none());
 }
+
+#[test]
+fn search_box_filters_all_folders_and_escape_clears() {
+    use egui::Key;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    let search = h.get_by_role(egui::accesskit::Role::TextInput);
+    search.focus();
+    search.type_text("promo");
+    h.run();
+    h.get_by_label("Example Shop — Promo");
+    assert!(h.query_by_label("Example Shop — Votre facture").is_none());
+    h.get_by_label("Chercher aussi sur le serveur");
+
+    h.key_press(Key::Escape);
+    h.run();
+    h.get_by_label("Example Shop — Votre facture");
+    assert!(h.query_by_label("Chercher aussi sur le serveur").is_none());
+}

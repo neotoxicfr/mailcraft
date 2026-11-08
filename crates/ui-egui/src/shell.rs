@@ -87,6 +87,8 @@ pub enum Command {
     /// Moves the selection up (-1) or down (+1).
     Step(i32),
     SearchChanged,
+    /// Search the whole mailbox on the server for the current query.
+    SearchServer,
     /// Selected messages to Deleted Items, or for good when `permanent` (already confirmed).
     Delete {
         permanent: bool,

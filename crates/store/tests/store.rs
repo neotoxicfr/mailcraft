@@ -211,3 +211,56 @@ fn sync_changes_listing_search_and_read_state() {
     assert!(s.body(1, "a").unwrap().is_none());
     assert!(s.messages(1, "inbox", "", 10).unwrap().is_empty());
 }
+
+#[test]
+fn full_text_search_ignores_accents_and_follows_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    s.upsert_account("microsoft", "user@example.com", "User", "t")
+        .unwrap();
+    s.replace_folders(1, &[folder("inbox", 0), folder("old", 0)])
+        .unwrap();
+    s.apply_changes(
+        1,
+        "inbox",
+        &[msg("a", "inbox", 100, "Votre facture d'électricité")],
+        &[],
+    )
+    .unwrap();
+    s.apply_changes(1, "old", &[msg("b", "old", 200, "Réunion lundi")], &[])
+        .unwrap();
+    let ids = |s: &Store, q: &str| {
+        s.search(1, q, 50)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(ids(&s, "electricite"), ["a"]);
+    assert_eq!(ids(&s, "FACT"), ["a"]); // prefix of the last word, any case
+    assert_eq!(ids(&s, "reunion"), ["b"]); // every folder
+    assert_eq!(ids(&s, "example"), ["b", "a"]); // sender address, newest first
+    assert!(ids(&s, "facture lundi").is_empty()); // all words required
+    for trap in ["\"", "*", "-", "NEAR", "a OR", "(", "facture\"", "AND NOT"] {
+        s.search(1, trap, 50).unwrap();
+    }
+
+    s.put_body(
+        1,
+        "b",
+        &MessageBody {
+            text: "Ordre du jour : budget 2027".into(),
+            to: String::new(),
+            cc: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(ids(&s, "budget"), ["b"]);
+    s.apply_changes(1, "old", &[msg("b", "old", 200, "Réunion annulée")], &[])
+        .unwrap();
+    assert_eq!(ids(&s, "annulee"), ["b"]);
+    assert!(ids(&s, "lundi").is_empty());
+    s.apply_changes(1, "old", &[], &["b".into()]).unwrap();
+    assert!(ids(&s, "budget").is_empty());
+}

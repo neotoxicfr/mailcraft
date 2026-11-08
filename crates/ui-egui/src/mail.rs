@@ -15,6 +15,8 @@ pub enum Status {
         messages: usize,
     },
     UpToDate,
+    SearchingServer,
+    ServerFound(usize),
     /// Changes made locally wait for the network.
     Offline {
         pending: usize,
@@ -37,6 +39,8 @@ pub struct Mail {
     pub body: Option<MessageBody>,
     pub status: Status,
     pub signing_in: bool,
+    /// The list shows search results (all folders) rather than one folder.
+    pub searching: bool,
     /// `None` until a store is attached.
     pub encrypted: Option<bool>,
 }
@@ -62,8 +66,11 @@ impl Mail {
                 .or(self.folders.first())
                 .map(|f| (f.account_id, f.id.clone()));
         }
+        // A search covers every folder of the account; otherwise the folder's messages.
+        self.searching = !search.trim().is_empty();
         self.messages = match &self.folder {
-            Some((a, f)) => store.messages(*a, f, search, LIST_LIMIT)?,
+            Some((a, _)) if self.searching => store.search(*a, search, LIST_LIMIT)?,
+            Some((a, f)) => store.messages(*a, f, "", LIST_LIMIT)?,
             None => Vec::new(),
         };
         let listed = |a: i64, id: &str, list: &[MessageSummary]| {
@@ -99,6 +106,13 @@ impl Mail {
             .iter()
             .filter(|m| self.is_selected(m.account_id, &m.id))
             .collect()
+    }
+
+    pub fn folder_name(&self, account_id: i64, id: &str) -> &str {
+        self.folders
+            .iter()
+            .find(|f| f.account_id == account_id && f.id == id)
+            .map_or("", |f| f.name.as_str())
     }
 
     pub fn current_folder(&self) -> Option<&Folder> {

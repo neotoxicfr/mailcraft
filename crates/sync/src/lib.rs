@@ -72,6 +72,11 @@ pub enum Request {
         account_id: i64,
         id: String,
     },
+    /// Searches the whole mailbox on the server and adds what it finds to the local copy.
+    SearchServer {
+        account_id: i64,
+        query: String,
+    },
 }
 
 /// A message change made locally, kept in the store until Microsoft accepts it.
@@ -119,6 +124,10 @@ pub enum Event {
     Offline {
         pending: usize,
         reason: String,
+    },
+    /// A server search finished; `found` messages are now in the local copy.
+    ServerSearchDone {
+        found: usize,
     },
     Error(String),
 }
@@ -325,6 +334,31 @@ impl Runner {
                 self.refresh_folders(account_id, emit)?;
                 // Its messages now sit in Deleted Items on the server.
                 self.sync_account(account_id, emit)
+            }
+            Request::SearchServer { account_id, query } => {
+                let found = self.with_graph(account_id, |g| g.search(&query, 100))?;
+                let known: Vec<String> = self
+                    .store
+                    .folders(account_id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|f| f.id)
+                    .collect();
+                let mut count = 0;
+                for (folder_id, m) in found {
+                    // Messages in folders MailCraft does not list (hidden ones) are left out.
+                    if !known.contains(&folder_id) {
+                        continue;
+                    }
+                    let summary = summary(account_id, &folder_id, m);
+                    self.store
+                        .apply_changes(account_id, &folder_id, &[summary], &[])
+                        .map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+                emit(Event::Changed);
+                emit(Event::ServerSearchDone { found: count });
+                Ok(())
             }
         }
     }
@@ -555,19 +589,7 @@ impl Runner {
             let upserts: Vec<MessageSummary> = page
                 .messages
                 .into_iter()
-                .map(|m| MessageSummary {
-                    account_id,
-                    id: m.id,
-                    folder_id: folder.id.clone(),
-                    from_name: m.from_name,
-                    from_addr: m.from_addr,
-                    subject: m.subject,
-                    preview: m.preview,
-                    received: m.received,
-                    is_read: m.is_read,
-                    has_attachments: m.has_attachments,
-                    flagged: m.flagged,
-                })
+                .map(|m| summary(account_id, &folder.id, m))
                 .collect();
             count += upserts.len();
             self.store
@@ -597,4 +619,20 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+fn summary(account_id: i64, folder_id: &str, m: mailcraft_graph::RemoteMessage) -> MessageSummary {
+    MessageSummary {
+        account_id,
+        id: m.id,
+        folder_id: folder_id.to_owned(),
+        from_name: m.from_name,
+        from_addr: m.from_addr,
+        subject: m.subject,
+        preview: m.preview,
+        received: m.received,
+        is_read: m.is_read,
+        has_attachments: m.has_attachments,
+        flagged: m.flagged,
+    }
 }

@@ -209,7 +209,62 @@ impl Store {
                 COMMIT;",
             )?;
         }
+        if version < 3 {
+            // Full-text index of every message (sender, subject, preview, body once read), kept
+            // in step by triggers. Accents and case are ignored. Inside the encrypted database,
+            // so the index is encrypted too.
+            self.conn.execute_batch(
+                "BEGIN;
+                CREATE VIRTUAL TABLE search USING fts5(
+                    sender, subject, preview, body,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+                INSERT INTO search (rowid, sender, subject, preview, body)
+                    SELECT m.rowid, m.from_name || ' ' || m.from_addr, m.subject, m.preview, COALESCE(b.text, '')
+                    FROM messages m LEFT JOIN bodies b ON b.account_id = m.account_id AND b.id = m.id;
+                CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+                    INSERT INTO search (rowid, sender, subject, preview, body)
+                    VALUES (new.rowid, new.from_name || ' ' || new.from_addr, new.subject, new.preview, '');
+                END;
+                CREATE TRIGGER messages_au AFTER UPDATE OF from_name, from_addr, subject, preview ON messages BEGIN
+                    UPDATE search SET sender = new.from_name || ' ' || new.from_addr,
+                        subject = new.subject, preview = new.preview
+                    WHERE rowid = new.rowid;
+                END;
+                CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                    DELETE FROM search WHERE rowid = old.rowid;
+                END;
+                CREATE TRIGGER bodies_ai AFTER INSERT ON bodies BEGIN
+                    UPDATE search SET body = new.text
+                    WHERE rowid = (SELECT rowid FROM messages WHERE account_id = new.account_id AND id = new.id);
+                END;
+                PRAGMA user_version = 3;
+                COMMIT;",
+            )?;
+        }
         Ok(())
+    }
+
+    /// Messages of the account matching every word of `query` (the last one as a prefix, so
+    /// results follow typing), newest first, all folders.
+    pub fn search(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageSummary>> {
+        let Some(fts) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut st = self.conn.prepare(
+            "SELECT m.account_id, m.id, m.folder_id, m.from_name, m.from_addr, m.subject, m.preview,
+                    m.received, m.is_read, m.has_attachments, m.flagged
+             FROM search JOIN messages m ON m.rowid = search.rowid
+             WHERE search MATCH ?2 AND m.account_id = ?1
+             ORDER BY m.received DESC LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![account_id, fts, limit as i64], summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ---- pending changes ----
@@ -449,21 +504,10 @@ impl Store {
                     OR from_addr LIKE ?3 ESCAPE '\\')
              ORDER BY received DESC LIMIT ?4",
         )?;
-        let rows = st.query_map(params![account_id, folder_id, pattern, limit as i64], |r| {
-            Ok(MessageSummary {
-                account_id: r.get(0)?,
-                id: r.get(1)?,
-                folder_id: r.get(2)?,
-                from_name: r.get(3)?,
-                from_addr: r.get(4)?,
-                subject: r.get(5)?,
-                preview: r.get(6)?,
-                received: r.get(7)?,
-                is_read: r.get(8)?,
-                has_attachments: r.get(9)?,
-                flagged: r.get(10)?,
-            })
-        })?;
+        let rows = st.query_map(
+            params![account_id, folder_id, pattern, limit as i64],
+            summary_from_row,
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -579,5 +623,54 @@ impl Store {
             params![account_id, id, body.text, body.to, body.cc],
         )?;
         Ok(())
+    }
+}
+
+fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
+    Ok(MessageSummary {
+        account_id: r.get(0)?,
+        id: r.get(1)?,
+        folder_id: r.get(2)?,
+        from_name: r.get(3)?,
+        from_addr: r.get(4)?,
+        subject: r.get(5)?,
+        preview: r.get(6)?,
+        received: r.get(7)?,
+        is_read: r.get(8)?,
+        has_attachments: r.get(9)?,
+        flagged: r.get(10)?,
+    })
+}
+
+/// User text to an FTS5 query: each word quoted (so `-`, `*`, `NEAR`, `"`… are plain text), all
+/// words required, the last one as a prefix. `None` when there is nothing to look for.
+fn fts_query(text: &str) -> Option<String> {
+    let words: Vec<String> = text
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{w}\""))
+        .collect();
+    let (last, rest) = words.split_last()?;
+    let mut q = rest.join(" ");
+    if !q.is_empty() {
+        q.push(' ');
+    }
+    q.push_str(last);
+    q.push('*');
+    Some(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fts_query;
+
+    #[test]
+    fn fts_query_quotes_every_word() {
+        assert_eq!(fts_query("  "), None);
+        assert_eq!(fts_query("fac").as_deref(), Some("\"fac\"*"));
+        assert_eq!(
+            fts_query("NEAR -x \"a*").as_deref(),
+            Some("\"NEAR\" \"-x\" \"a*\"*")
+        );
     }
 }
