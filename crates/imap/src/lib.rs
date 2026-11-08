@@ -181,7 +181,33 @@ pub fn parse_id(id: &str) -> Option<(u32, u32, &str)> {
     Some((v, u, it.next()?))
 }
 
-type Tls = StreamOwned<ClientConnection, TcpStream>;
+/// The TLS connection, wrapped so the IMAP client can change its read timeout (IDLE).
+pub struct Tls(StreamOwned<ClientConnection, TcpStream>);
+
+impl Read for Tls {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Tls {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl imap::extensions::idle::SetReadTimeout for Tls {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> imap::Result<()> {
+        self.0
+            .sock
+            .set_read_timeout(timeout)
+            .map_err(imap::Error::Io)
+    }
+}
 
 fn tls_stream(host: &str, port: u16) -> Result<Tls> {
     let tcp =
@@ -199,7 +225,7 @@ fn tls_stream(host: &str, port: u16) -> Result<Tls> {
         .map_err(|e| Error::Network(format!("{host}: {e}")))?;
     let conn =
         ClientConnection::new(Arc::new(config), name).map_err(|e| Error::Network(e.to_string()))?;
-    Ok(StreamOwned::new(conn, tcp))
+    Ok(Tls(StreamOwned::new(conn, tcp)))
 }
 
 /// IMAP date for SEARCH SINCE: `1-Feb-2026`.
@@ -311,6 +337,33 @@ impl Imap {
             can_move,
             selected: None,
         })
+    }
+
+    /// Waits on the inbox with IDLE and calls `changed` each time the server reports new or
+    /// removed mail. Returns when `changed` returns false, or on a connection error.
+    pub fn watch_inbox(&mut self, mut changed: impl FnMut() -> bool) -> Result<()> {
+        use imap::extensions::idle::{WaitOutcome, stop_on_any};
+        let has_idle = self
+            .session
+            .capabilities()
+            .map(|c| c.has_str("IDLE"))
+            .unwrap_or(false);
+        if !has_idle {
+            return Err(Error::Refused("the server does not offer IDLE".into()));
+        }
+        self.select("INBOX")?;
+        loop {
+            // Servers drop an IDLE after 30 minutes; renewing it every 10 keeps it alive.
+            let outcome = self
+                .session
+                .idle()
+                .timeout(Duration::from_secs(600))
+                .wait_while(stop_on_any)
+                .map_err(Error::from)?;
+            if outcome == WaitOutcome::MailboxChanged && !changed() {
+                return Ok(());
+            }
+        }
     }
 
     pub fn logout(mut self) {

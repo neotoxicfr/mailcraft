@@ -161,11 +161,70 @@ impl Runner {
         Ok(folders)
     }
 
+    /// Inbox only: what the server announced through IDLE.
+    pub(crate) fn imap_sync_inbox(
+        &mut self,
+        account_id: i64,
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
+        let inbox = self
+            .store
+            .folders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|f| f.role.as_deref() == Some("inbox"));
+        match inbox {
+            Some(f) => self.imap_sync_folder(account_id, &f, emit),
+            None => Ok(()),
+        }
+    }
+
+    /// Starts, once per account, a thread that waits on the inbox with IDLE and asks this
+    /// worker to sync it as soon as the server announces a change. Mail then arrives within
+    /// seconds instead of at the next 2-minute sync.
+    fn watch_inbox(&mut self, account_id: i64) {
+        if !self.watched.insert(account_id) {
+            return;
+        }
+        let Ok(server) = self.server(account_id) else {
+            return;
+        };
+        let again = self.again.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("mailcraft-idle-{account_id}"))
+            .spawn(move || {
+                loop {
+                    let result = Imap::connect(&server).and_then(|mut s| {
+                        s.watch_inbox(|| {
+                            again.send(crate::Request::SyncInbox { account_id }).is_ok()
+                        })
+                    });
+                    match result {
+                        // The worker is gone (MailCraft closing).
+                        Ok(()) => return,
+                        // Wrong password or no IDLE on this server: the 2-minute sync remains.
+                        Err(ImapError::Auth(e) | ImapError::Refused(e)) => {
+                            log::info!("no instant mail for account {account_id}: {e}");
+                            return;
+                        }
+                        Err(e) => {
+                            log::info!("instant mail for account {account_id} paused: {e}");
+                            std::thread::sleep(std::time::Duration::from_secs(60));
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.watched.remove(&account_id);
+        }
+    }
+
     pub(crate) fn imap_sync_account(
         &mut self,
         account_id: i64,
         emit: &dyn Fn(Event),
     ) -> Result<(), String> {
+        self.watch_inbox(account_id);
         let folders = self.imap_refresh_folders(account_id, emit)?;
         let views = self.views.get(&account_id).cloned().unwrap_or_default();
         let mut order: Vec<&Folder> = folders.iter().filter(|f| !views.contains(&f.id)).collect();

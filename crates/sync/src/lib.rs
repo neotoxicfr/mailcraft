@@ -35,6 +35,10 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     AddMicrosoftAccount,
+    /// The server said the inbox of this IMAP account changed (IDLE): sync it now.
+    SyncInbox {
+        account_id: i64,
+    },
     /// Checks the IMAP and SMTP sign-in, then adds the account and syncs it.
     AddImapAccount {
         server: Box<mailcraft_imap::Server>,
@@ -264,6 +268,7 @@ impl Worker {
     /// Starts the thread. `wake` is called after each event so the UI repaints.
     pub fn start(config: Config, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, requests) = mpsc::channel();
+        let again = tx.clone();
         let (events, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
@@ -275,7 +280,7 @@ impl Worker {
                     let _ = events.send(e);
                     wake();
                 };
-                match Runner::new(config, flag, side) {
+                match Runner::new(config, flag, side, again) {
                     Ok(mut runner) => runner.run(&requests, &emit),
                     Err(e) => emit(Event::Error(e)),
                 }
@@ -324,10 +329,19 @@ struct Runner {
     views: HashMap<i64, HashSet<String>>,
     /// Last IMAP message read in full: (id, bytes).
     raw: Option<(String, Vec<u8>)>,
+    /// Sends requests to this same worker (from the IDLE threads).
+    again: Sender<Request>,
+    /// IMAP accounts whose inbox is watched with IDLE.
+    watched: HashSet<i64>,
 }
 
 impl Runner {
-    fn new(config: Config, cancel: Arc<AtomicBool>, side: Side) -> Result<Self, String> {
+    fn new(
+        config: Config,
+        cancel: Arc<AtomicBool>,
+        side: Side,
+        again: Sender<Request>,
+    ) -> Result<Self, String> {
         let store = Store::open(&config.db_path, config.key.clone(), config.encrypt_new)
             .map_err(|e| e.to_string())?;
         let http = mailcraft_graph::http_client()?;
@@ -346,6 +360,8 @@ impl Runner {
             servers: HashMap::new(),
             views: HashMap::new(),
             raw: None,
+            again,
+            watched: HashSet::new(),
         })
     }
 
@@ -373,6 +389,11 @@ impl Runner {
         };
         match request {
             Request::AddImapAccount { .. } => Ok(()),
+            Request::SyncInbox { account_id } => {
+                self.imap_sync_inbox(account_id, emit)?;
+                emit(Event::SyncDone);
+                Ok(())
+            }
             Request::AddMicrosoftAccount => self.add_account(emit),
             Request::SyncAll => {
                 self.flush_pending(emit)?;
