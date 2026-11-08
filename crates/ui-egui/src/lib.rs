@@ -492,6 +492,59 @@ impl MailCraftApp {
                 });
                 self.dirty = true;
             }
+            Command::PlaceAccount {
+                email,
+                target,
+                after,
+            } => {
+                let current: Vec<String> = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .map(|a| a.email.to_lowercase())
+                    .collect();
+                self.settings.update(|p| {
+                    settings::FolderLayout::place(
+                        &mut p.folders.accounts,
+                        &current,
+                        &email.to_lowercase(),
+                        &target.to_lowercase(),
+                        after,
+                    );
+                });
+                self.dirty = true;
+            }
+            Command::PlaceFolder {
+                account_id,
+                id,
+                target,
+                after,
+            } => {
+                let email = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == account_id)
+                    .map(|a| a.email.to_lowercase())?;
+                let parent = self
+                    .mail
+                    .folders
+                    .iter()
+                    .find(|f| f.account_id == account_id && f.id == id)
+                    .map(|f| f.parent_id.clone());
+                let siblings: Vec<String> = self
+                    .mail
+                    .folder_tree(account_id)
+                    .into_iter()
+                    .filter(|(f, _)| Some(f.parent_id.clone()) == parent)
+                    .map(|(f, _)| f.id.clone())
+                    .collect();
+                self.settings.update(|p| {
+                    let list = p.folders.folders.entry(email).or_default();
+                    settings::FolderLayout::place(list, &siblings, &id, &target, after);
+                });
+                self.dirty = true;
+            }
             Command::MoveFolder { account_id, id, up } => {
                 let email = self
                     .mail

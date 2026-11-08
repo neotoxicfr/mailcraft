@@ -591,3 +591,43 @@ fn folder_pane_folds_and_reorders() {
     h.run();
     assert!(h.query_by_label("Éléments supprimés").is_none());
 }
+
+#[test]
+fn folders_reorder_by_drag_and_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    // The account section (not Favourites): the last of each label.
+    let from = h
+        .query_all_by_label("Éléments supprimés")
+        .last()
+        .unwrap()
+        .rect()
+        .center();
+    let to = h
+        .query_all_by_label("Éléments envoyés")
+        .last()
+        .unwrap()
+        .rect();
+    let target = egui::pos2(to.center().x, to.top() + 3.0); // upper half: just before it
+    h.hover_at(from);
+    h.run();
+    h.drag_at(from);
+    h.run();
+    for step in 1..=6 {
+        h.hover_at(from + (target - from) * (step as f32 / 6.0));
+        h.run();
+    }
+    h.drop_at(target);
+    h.run();
+    h.run();
+    let layout = h.state().as_ref().unwrap().prefs().folders.clone();
+    let order = layout
+        .folders
+        .get("user@example.com")
+        .cloned()
+        .unwrap_or_default();
+    let trash = order.iter().position(|x| x == "trash");
+    let sent = order.iter().position(|x| x == "sent");
+    assert!(trash.is_some() && trash < sent, "{order:?}");
+}

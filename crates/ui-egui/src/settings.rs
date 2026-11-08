@@ -174,6 +174,27 @@ impl FolderLayout {
         }
     }
 
+    /// Puts `item` just before (or after) `target` within `current` (the order as shown) and
+    /// records the result in `list`.
+    pub fn place(
+        list: &mut Vec<String>,
+        current: &[String],
+        item: &str,
+        target: &str,
+        after: bool,
+    ) {
+        if item == target || !current.iter().any(|x| x == item) {
+            return;
+        }
+        let mut order: Vec<String> = current.iter().filter(|x| *x != item).cloned().collect();
+        let Some(t) = order.iter().position(|x| x == target) else {
+            return;
+        };
+        order.insert(if after { t + 1 } else { t }, item.to_owned());
+        list.retain(|x| !order.contains(x));
+        list.extend(order);
+    }
+
     /// Moves `item` one place up or down within `current` (the order as shown) and records the
     /// result in `list`.
     pub fn move_in(list: &mut Vec<String>, current: &[String], item: &str, up: bool) {
@@ -210,6 +231,11 @@ mod layout_tests {
         let mut list2 = Vec::new();
         FolderLayout::move_in(&mut list2, &shown, "a", true); // already first
         assert!(list2.is_empty());
+        let mut list3 = Vec::new();
+        FolderLayout::place(&mut list3, &shown, "a", "c", true);
+        assert_eq!(list3, ["b", "c", "a"]);
+        FolderLayout::place(&mut list3, &shown, "c", "a", false);
+        assert_eq!(list3, ["c", "a", "b"]);
         let mut l = FolderLayout::default();
         l.toggle("fav");
         assert!(l.folded.contains("fav"));

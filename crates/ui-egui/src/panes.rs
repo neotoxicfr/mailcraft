@@ -43,6 +43,16 @@ fn one_line(
 /// Drag-and-drop payload: the selected messages are being dragged.
 pub struct DraggedMessages;
 
+/// An account heading being dragged to a new place (its address).
+pub struct DraggedAccount(String);
+
+/// A folder being dragged to a new place among its siblings.
+pub struct DraggedFolder {
+    account_id: i64,
+    id: String,
+    parent: Option<String>,
+}
+
 pub fn folder_pane(
     ui: &mut Ui,
     c: &Ctx<'_>,
@@ -68,7 +78,15 @@ pub fn folder_pane(
     }
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         let fav_open = !c.folded.contains("fav");
-        fold_title(ui, c, T::Favorites.get(c.lang), "fav", fav_open, command);
+        fold_title(
+            ui,
+            c,
+            T::Favorites.get(c.lang),
+            "fav",
+            fav_open,
+            None,
+            command,
+        );
         if fav_open && mail.accounts.len() > 1 {
             let inboxes = mail
                 .folders
@@ -123,7 +141,15 @@ pub fn folder_pane(
             let email = account.email.to_lowercase();
             let key = format!("a:{email}");
             let open = !c.folded.contains(&key);
-            let title = fold_title(ui, c, &account.email, &key, open, command);
+            let title = fold_title(
+                ui,
+                c,
+                &account.email,
+                &key,
+                open,
+                Some(&account.email),
+                command,
+            );
             title.context_menu(|ui| {
                 if ui
                     .add_enabled(i > 0, egui::Button::new(T::MoveUp.get(c.lang)))
@@ -193,17 +219,57 @@ fn paint_fold(ui: &Ui, center: egui::Pos2, open: bool, color: Color32) {
         .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
-/// Section heading that folds what is under it (Favorites, an account).
+/// Where a dragged entry would land on `rect`: just after it when the pointer is in its lower
+/// half. Draws the insertion line.
+fn drop_line(ui: &Ui, c: &Ctx<'_>, rect: Rect) -> bool {
+    let after = ui
+        .ctx()
+        .pointer_hover_pos()
+        .is_some_and(|p| p.y > rect.center().y);
+    let y = if after { rect.bottom() } else { rect.top() };
+    ui.painter()
+        .hline(rect.x_range(), y, Stroke::new(2.0, c.accent));
+    after
+}
+
+/// Section heading that folds what is under it (Favorites, an account). An account heading
+/// (`drag`: its address) can be dragged onto another one to change their order.
 fn fold_title(
     ui: &mut Ui,
     c: &Ctx<'_>,
     text: &str,
     key: &str,
     open: bool,
+    drag: Option<&str>,
     command: &mut Option<Command>,
 ) -> egui::Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
+    let sense = if drag.is_some() {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), sense);
+    if let Some(email) = drag {
+        if response.drag_started() {
+            response.dnd_set_drag_payload(DraggedAccount(email.to_owned()));
+        }
+        if response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+        if let Some(p) = response.dnd_hover_payload::<DraggedAccount>()
+            && p.0 != email
+        {
+            let after = drop_line(ui, c, rect);
+            if let Some(p) = response.dnd_release_payload::<DraggedAccount>() {
+                *command = Some(Command::PlaceAccount {
+                    email: p.0.clone(),
+                    target: email.to_owned(),
+                    after,
+                });
+            }
+        }
+    }
     response.widget_info(|| WidgetInfo::selected(Role::TreeItem, true, open, text));
     let color = ui.visuals().text_color();
     paint_fold(
@@ -252,8 +318,25 @@ fn folder_row_with(
     command: &mut Option<Command>,
 ) {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, FOLDER_ROW), Sense::click());
+    let sense = if movable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, FOLDER_ROW), sense);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if movable {
+        if response.drag_started() {
+            response.dnd_set_drag_payload(DraggedFolder {
+                account_id: f.account_id,
+                id: f.id.clone(),
+                parent: f.parent_id.clone(),
+            });
+        }
+        if response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
     let selected = c
         .mail
         .folder
@@ -275,6 +358,23 @@ fn folder_row_with(
             Stroke::new(1.5, c.accent),
             egui::StrokeKind::Inside,
         );
+    }
+    // A folder dragged among its siblings: show where it would go, place it on release.
+    if movable
+        && let Some(p) = response.dnd_hover_payload::<DraggedFolder>()
+        && p.account_id == f.account_id
+        && p.parent == f.parent_id
+        && p.id != f.id
+    {
+        let after = drop_line(ui, c, rect);
+        if let Some(p) = response.dnd_release_payload::<DraggedFolder>() {
+            *command = Some(Command::PlaceFolder {
+                account_id: p.account_id,
+                id: p.id.clone(),
+                target: f.id.clone(),
+                after,
+            });
+        }
     }
     let x = rect.left() + 10.0 + depth as f32 * 12.0;
     let mut toggled = false;

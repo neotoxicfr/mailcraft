@@ -160,6 +160,18 @@ pub enum Command {
         id: String,
         up: bool,
     },
+    /// Dropped by drag and drop just before (or after) another entry.
+    PlaceAccount {
+        email: String,
+        target: String,
+        after: bool,
+    },
+    PlaceFolder {
+        account_id: i64,
+        id: String,
+        target: String,
+        after: bool,
+    },
     /// Opens the "add an account" dialog.
     AddAccount,
     AddMicrosoftAccount,
