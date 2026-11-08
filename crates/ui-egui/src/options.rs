@@ -117,35 +117,82 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, prefs: &mut Prefs, view: &mut View) -> Opt
 
             section(ui, T::ClaudeSection, lang);
             ui.label(RichText::new(T::ClaudeHelp.get(lang)).small());
-            match view.claude_key_saved {
-                Some(true) => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(T::ClaudeKeySaved.get(lang)).strong());
-                        if ui.button(T::ClaudeKeyDelete.get(lang)).clicked() {
-                            command = Some(Command::DeleteClaudeKey);
+            let before = prefs.ai.provider;
+            ui.horizontal(|ui| {
+                let l = ui.label(T::AiProvider.get(lang));
+                egui::ComboBox::from_id_salt("ai_provider")
+                    .selected_text(prefs.ai.provider.label())
+                    .show_ui(ui, |ui| {
+                        for p in mailcraft_ai::Provider::ALL {
+                            ui.selectable_value(&mut prefs.ai.provider, p, p.label());
                         }
-                    });
-                }
-                _ => {
-                    ui.horizontal(|ui| {
-                        let l = ui.label(T::ClaudeKey.get(lang));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut view.claude_key)
-                                .password(true)
-                                .hint_text("sk-ant-…")
-                                .desired_width(280.0),
-                        )
-                        .labelled_by(l.id);
-                        let ok = view.claude_key.trim().starts_with("sk-ant-");
-                        if ui
-                            .add_enabled(ok, egui::Button::new(T::ClaudeKeySave.get(lang)))
-                            .clicked()
-                        {
-                            command = Some(Command::SaveClaudeKey {
-                                key: std::mem::take(&mut view.claude_key),
-                            });
-                        }
-                    });
+                    })
+                    .response
+                    .labelled_by(l.id);
+            });
+            let provider = prefs.ai.provider;
+            if provider != before {
+                prefs.ai.model.clear();
+                prefs.ai.url.clear();
+                view.claude_key.clear();
+                command = Some(Command::AiProviderChanged);
+            }
+            ui.horizontal(|ui| {
+                let l = ui.label(T::AiModel.get(lang));
+                ui.add(
+                    egui::TextEdit::singleline(&mut prefs.ai.model)
+                        .hint_text(provider.default_model())
+                        .desired_width(220.0),
+                )
+                .labelled_by(l.id);
+            });
+            if matches!(
+                provider,
+                mailcraft_ai::Provider::Ollama | mailcraft_ai::Provider::Custom
+            ) {
+                ui.horizontal(|ui| {
+                    let l = ui.label(T::AiServer.get(lang));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut prefs.ai.url)
+                            .hint_text(provider.default_url())
+                            .desired_width(320.0),
+                    )
+                    .labelled_by(l.id);
+                });
+            }
+            if provider == mailcraft_ai::Provider::Ollama {
+                ui.label(RichText::new(T::AiNoKeyNeeded.get(lang)).small());
+            } else {
+                match view.claude_key_saved {
+                    Some(true) => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(T::ClaudeKeySaved.get(lang)).strong());
+                            if ui.button(T::ClaudeKeyDelete.get(lang)).clicked() {
+                                command = Some(Command::DeleteClaudeKey);
+                            }
+                        });
+                    }
+                    _ => {
+                        ui.horizontal(|ui| {
+                            let l = ui.label(T::ClaudeKey.get(lang));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut view.claude_key)
+                                    .password(true)
+                                    .hint_text(provider.key_hint())
+                                    .desired_width(280.0),
+                            )
+                            .labelled_by(l.id);
+                            let ok = provider.key_looks_valid(&view.claude_key);
+                            if ui
+                                .add_enabled(ok, egui::Button::new(T::ClaudeKeySave.get(lang)))
+                                .clicked()
+                            {
+                                command = Some(Command::SaveClaudeKey {
+                                    key: std::mem::take(&mut view.claude_key),
+                                });
+                            }
+                        });
+                    }
                 }
             }
 

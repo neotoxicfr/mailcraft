@@ -190,6 +190,8 @@ pub enum Command {
         key: String,
     },
     DeleteClaudeKey,
+    /// Another AI provider was picked: its key state must be read again.
+    AiProviderChanged,
     /// Claude classifies senders (all of them again with `force`).
     Classify {
         force: bool,

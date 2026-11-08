@@ -538,6 +538,7 @@ impl MailCraftApp {
             | Command::SaveAllowList { .. }
             | Command::SaveClaudeKey { .. }
             | Command::DeleteClaudeKey
+            | Command::AiProviderChanged
             | Command::Classify { .. }
             | Command::Digest) => self.run_view(cmd),
             Command::SearchServer => {
@@ -1178,30 +1179,55 @@ impl MailCraftApp {
 }
 
 impl MailCraftApp {
+    /// Whether the chosen AI provider has a key in the vault (real app only: tests never touch
+    /// the vault).
+    fn read_key_state(&mut self) {
+        if self.integrations {
+            let name = self.settings.get().ai.provider.vault_name();
+            self.view.claude_key_saved = Some(
+                mailcraft_store::vault::secret(name)
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            );
+        } else {
+            self.view.claude_key_saved = None;
+        }
+    }
+
     /// Commands of the Options, clean-up and screener views.
     fn run_view(&mut self, command: Command) {
         match command {
             Command::SaveClaudeKey { key } => {
-                match mailcraft_store::vault::set_secret(mailcraft_sync::CLAUDE_KEY, key.trim()) {
+                let name = self.settings.get().ai.provider.vault_name();
+                match mailcraft_store::vault::set_secret(name, key.trim()) {
                     Ok(()) => self.view.claude_key_saved = Some(true),
                     Err(e) => self.mail.status = Status::Error(e.to_string()),
                 }
             }
             Command::DeleteClaudeKey => {
-                match mailcraft_store::vault::delete_secret(mailcraft_sync::CLAUDE_KEY) {
+                let name = self.settings.get().ai.provider.vault_name();
+                match mailcraft_store::vault::delete_secret(name) {
                     Ok(()) => self.view.claude_key_saved = Some(false),
                     Err(e) => self.mail.status = Status::Error(e.to_string()),
                 }
             }
+            Command::AiProviderChanged => self.read_key_state(),
             Command::Classify { force } => {
                 if let Some(account_id) = self.current_account() {
                     self.mail.classifying = Some((0, 0));
-                    self.send(Request::ClassifySenders { account_id, force });
+                    let ai = self.settings.get().ai.clone();
+                    self.send(Request::ClassifySenders {
+                        account_id,
+                        force,
+                        ai,
+                    });
                 }
             }
             Command::Digest => {
                 if let Some(account_id) = self.current_account() {
-                    self.send(Request::Digest { account_id });
+                    let ai = self.settings.get().ai.clone();
+                    self.send(Request::Digest { account_id, ai });
                 }
             }
             Command::Screen { address, accept } => {
@@ -1231,14 +1257,7 @@ impl MailCraftApp {
             Command::OpenOptions => {
                 self.view.options_open = true;
                 self.view.cleanup_open = false;
-                if self.integrations {
-                    self.view.claude_key_saved = Some(
-                        mailcraft_store::vault::secret(mailcraft_sync::CLAUDE_KEY)
-                            .ok()
-                            .flatten()
-                            .is_some(),
-                    );
-                }
+                self.read_key_state();
             }
             Command::CloseOptions => self.view.options_open = false,
             Command::RebuildLocalCopy => {

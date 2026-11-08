@@ -3,7 +3,10 @@ use std::net::TcpListener;
 
 use serde_json::json;
 
-use super::{AiError, Claude, SenderFacts, classify_body, parse_verdicts, short};
+use super::{
+    AiError, Assistant, Choice, Provider, SenderFacts, chat_text, classify_body, parse_verdicts,
+    short, verdicts_from_text,
+};
 
 fn facts() -> SenderFacts {
     SenderFacts {
@@ -60,12 +63,13 @@ fn verdict_parsing_refusal_and_thinking_blocks() {
     assert!(parse_verdicts(&garbage).is_err());
 }
 
-/// A local stand-in for the API: checks the headers and answers with a canned response.
-#[test]
-fn http_round_trip_against_a_local_server() {
+type Seen = (Vec<String>, String);
+
+/// A local stand-in for an API: answers `answer` once, gives back the headers and body it got.
+fn serve(answer: String) -> (String, std::thread::JoinHandle<Seen>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let url = format!(
-        "http://127.0.0.1:{}/v1/messages",
+        "http://127.0.0.1:{}/v1/x",
         listener.local_addr().unwrap().port()
     );
     let server = std::thread::spawn(move || {
@@ -87,18 +91,33 @@ fn http_round_trip_against_a_local_server() {
         }
         let mut body = vec![0u8; length];
         reader.read_exact(&mut body).unwrap();
-        let answer = json!({
-            "stop_reason": "end_turn",
-            "content": [{ "type": "text", "text": "{\"verdicts\":[{\"adresse\":\"news@shop.example\",\"categorie\":\"newsletter\",\"confiance\":0.9,\"raison\":\"Lettre d'info\",\"action_suggeree\":\"garder\"}]}" }]
-        })
-        .to_string();
         let mut out = stream;
-        write!(out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}", answer.len()).unwrap();
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+            answer.len()
+        )
+        .unwrap();
         (headers, String::from_utf8(body).unwrap())
     });
     let _ = rustls::crypto::ring::default_provider().install_default();
+    (url, server)
+}
+
+const VERDICTS: &str = "{\"verdicts\":[{\"adresse\":\"news@shop.example\",\"categorie\":\"newsletter\",\"confiance\":0.9,\"raison\":\"Lettre d'info\",\"action_suggeree\":\"garder\"}]}";
+
+#[test]
+fn anthropic_round_trip_against_a_local_server() {
+    let answer =
+        json!({ "stop_reason": "end_turn", "content": [{ "type": "text", "text": VERDICTS }] });
+    let (url, server) = serve(answer.to_string());
     let http = reqwest::blocking::Client::new();
-    let verdicts = Claude::with_url(&http, " sk-test ", &url)
+    let choice = Choice {
+        provider: Provider::Anthropic,
+        url: url.clone(),
+        ..Choice::default()
+    };
+    let verdicts = Assistant::new(&http, " sk-test ", &choice)
         .classify(&[facts()])
         .unwrap();
     assert_eq!(verdicts[0].categorie, "newsletter");
@@ -109,13 +128,69 @@ fn http_round_trip_against_a_local_server() {
             .iter()
             .any(|h| h.starts_with("anthropic-version: 2026-10-21"))
     );
-    assert!(body.contains("\"json_schema\""));
+    assert!(body.contains("\"json_schema\"") && body.contains("claude-haiku-5-5"));
 
     // No key: nothing is sent.
-    assert!(matches!(
-        Claude::with_url(&http, "", &url).classify(&[facts()]),
-        Err(AiError::Key(_))
-    ));
+    let r = Assistant::new(&http, "", &choice).classify(&[facts()]);
+    assert!(matches!(r, Err(AiError::Key(_))));
+}
+
+#[test]
+fn openai_format_round_trip_and_local_ollama_without_key() {
+    let answer =
+        json!({ "choices": [{ "finish_reason": "stop", "message": { "content": VERDICTS } }] });
+    let (url, server) = serve(answer.to_string());
+    let http = reqwest::blocking::Client::new();
+    let choice = Choice {
+        provider: Provider::Mistral,
+        model: "mon-modele".into(),
+        url,
+    };
+    let verdicts = Assistant::new(&http, "k-123", &choice)
+        .classify(&[facts()])
+        .unwrap();
+    assert_eq!(verdicts[0].adresse, "news@shop.example");
+    let (headers, body) = server.join().unwrap();
+    assert!(
+        headers
+            .iter()
+            .any(|h| h.trim() == "authorization: bearer k-123")
+    );
+    let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent["model"], "mon-modele");
+    assert_eq!(sent["messages"][0]["role"], "system");
+    assert_eq!(sent["response_format"]["json_schema"]["strict"], true);
+
+    // Ollama: no key needed, and none is sent.
+    let answer = json!({ "choices": [{ "message": { "content": "Résumé du jour." } }] });
+    let (url, server) = serve(answer.to_string());
+    let choice = Choice {
+        provider: Provider::Ollama,
+        model: String::new(),
+        url,
+    };
+    let text = Assistant::new(&http, "", &choice)
+        .digest(&[("Shop".into(), "Promo".into(), "-20 %".into())])
+        .unwrap();
+    assert_eq!(text, "Résumé du jour.");
+    let (headers, body) = server.join().unwrap();
+    assert!(!headers.iter().any(|h| h.starts_with("authorization")));
+    assert!(body.contains("llama3.2"));
+}
+
+#[test]
+fn chat_answers_refusals_fences_and_defaults() {
+    let refused = json!({ "choices": [{ "message": { "content": null, "refusal": "non" } }] });
+    assert!(matches!(chat_text(&refused), Err(AiError::Answer(_))));
+    let cut = json!({ "choices": [{ "finish_reason": "length", "message": { "content": "{" } }] });
+    assert!(chat_text(&cut).is_err());
+    let fenced = format!("Voici :\n```json\n{VERDICTS}\n```");
+    assert_eq!(verdicts_from_text(&fenced).unwrap().len(), 1);
+    assert_eq!(Choice::default().model(), "claude-haiku-5-5");
+    assert!(Provider::Anthropic.key_looks_valid("sk-ant-abc"));
+    assert!(!Provider::OpenAi.key_looks_valid("sk-ant-abc"));
+    assert!(!Provider::Gemini.key_looks_valid("deux mots"));
+    assert!(!Provider::Ollama.needs_key() && Provider::Gemini.needs_key());
 }
 
 #[test]

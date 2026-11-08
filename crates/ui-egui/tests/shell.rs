@@ -375,6 +375,28 @@ fn add_account_dialog_fills_servers_and_needs_a_password() {
 }
 
 #[test]
+fn options_pick_an_ai_provider() {
+    let mut h = harness(LangPref::Fr);
+    h.run();
+    h.get_by_label("Fichier").click();
+    h.run();
+    h.get_by_label("Options").click();
+    h.run();
+    h.get_by_label("Fournisseur").scroll_to_me();
+    h.run();
+    h.get_by_label("Fournisseur").click();
+    h.run();
+    h.get_by_label("Ollama (local)").click();
+    h.run();
+    let prefs = h.state().as_ref().unwrap().prefs().clone();
+    assert_eq!(prefs.ai.provider, mailcraft_ai::Provider::Ollama);
+    assert_eq!(prefs.ai.model(), "llama3.2");
+    // Local model: a server address, no key field.
+    h.get_by_label("Adresse du serveur");
+    assert!(h.query_by_label("Clé API").is_none());
+}
+
+#[test]
 fn welcome_assistant_steps_and_options_view() {
     let mut h = harness(LangPref::Fr);
     h.run();

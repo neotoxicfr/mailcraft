@@ -101,14 +101,16 @@ pub enum Request {
         account_id: i64,
         query: String,
     },
-    /// Claude classifies senders not classified yet (all with `force`); needs an API key.
+    /// The chosen AI classifies senders not classified yet (all with `force`).
     ClassifySenders {
         account_id: i64,
         force: bool,
+        ai: mailcraft_ai::Choice,
     },
-    /// Claude summarises the newsletters of the last 24 hours.
+    /// The chosen AI summarises the newsletters of the last 24 hours.
     Digest {
         account_id: i64,
+        ai: mailcraft_ai::Choice,
     },
     /// Creates or updates the server draft of composer `composer`.
     SaveDraft {
@@ -591,11 +593,13 @@ impl Runner {
             Request::AnalyzeSenders { account_id, force } => {
                 self.analyze_senders(account_id, force, emit)
             }
-            Request::ClassifySenders { account_id, force } => {
-                self.classify_senders(account_id, force, emit)
-            }
-            Request::Digest { account_id } => {
-                let text = self.digest(account_id)?;
+            Request::ClassifySenders {
+                account_id,
+                force,
+                ai,
+            } => self.classify_senders(account_id, force, &ai, emit),
+            Request::Digest { account_id, ai } => {
+                let text = self.digest(account_id, &ai)?;
                 emit(Event::DigestReady { text });
                 Ok(())
             }
@@ -1029,21 +1033,30 @@ impl Runner {
         Ok(())
     }
 
-    fn claude_key() -> Result<String, String> {
-        mailcraft_store::vault::secret(CLAUDE_KEY)
+    /// Key of the chosen provider; empty for one that needs none (Ollama, a local server).
+    fn ai_key(ai: &mailcraft_ai::Choice) -> Result<String, String> {
+        let key = mailcraft_store::vault::secret(ai.provider.vault_name())
             .map_err(|e| e.to_string())?
-            .filter(|k| !k.trim().is_empty())
-            .ok_or_else(|| "no Claude API key (File › Options › Claude)".to_owned())
+            .filter(|k| !k.trim().is_empty());
+        match key {
+            Some(k) => Ok(k),
+            None if !ai.provider.needs_key() => Ok(String::new()),
+            None => Err(format!(
+                "no {} API key (File › Options › AI)",
+                ai.provider.label()
+            )),
+        }
     }
 
-    /// Asks Claude about senders, 20 per request; the answer is kept, never asked twice.
+    /// Asks the AI about senders, 20 per request; the answer is kept, never asked twice.
     fn classify_senders(
         &mut self,
         account_id: i64,
         force: bool,
+        ai: &mailcraft_ai::Choice,
         emit: &dyn Fn(Event),
     ) -> Result<(), String> {
-        let key = Self::claude_key()?;
+        let key = Self::ai_key(ai)?;
         let todo: Vec<mailcraft_store::SenderRow> = self
             .store
             .senders(account_id)
@@ -1060,7 +1073,7 @@ impl Runner {
             });
             let facts: Vec<mailcraft_ai::SenderFacts> =
                 batch.iter().map(|s| self.facts(account_id, s)).collect();
-            let verdicts = mailcraft_ai::Claude::new(&self.http, &key)
+            let verdicts = mailcraft_ai::Assistant::new(&self.http, &key, ai)
                 .classify(&facts)
                 .map_err(|e| e.to_string())?;
             for v in verdicts {
@@ -1127,8 +1140,8 @@ impl Runner {
     }
 
     /// Summary of the last 24 hours of newsletters (by the local analysis or Claude).
-    fn digest(&mut self, account_id: i64) -> Result<String, String> {
-        let key = Self::claude_key()?;
+    fn digest(&mut self, account_id: i64, ai: &mailcraft_ai::Choice) -> Result<String, String> {
+        let key = Self::ai_key(ai)?;
         let newsletters: std::collections::HashSet<String> = self
             .store
             .senders(account_id)
@@ -1167,7 +1180,7 @@ impl Runner {
         if items.is_empty() {
             return Ok(String::new());
         }
-        mailcraft_ai::Claude::new(&self.http, &key)
+        mailcraft_ai::Assistant::new(&self.http, &key, ai)
             .digest(&items)
             .map_err(|e| e.to_string())
     }
@@ -1696,9 +1709,9 @@ pub fn unsubscribe_refusal(row: &mailcraft_store::SenderRow) -> Option<&'static 
     }
     match &row.ai {
         Some(ai) if matches!(ai.category.as_str(), "suspect" | "phishing") => {
-            Some("Claude rates it suspect or phishing")
+            Some("the AI rates it suspect or phishing")
         }
-        Some(ai) if ai.confidence < 0.8 => Some("Claude is not confident enough (below 0.8)"),
+        Some(ai) if ai.confidence < 0.8 => Some("the AI is not confident enough (below 0.8)"),
         _ => None,
     }
 }
@@ -1907,6 +1920,3 @@ mod cleanup_tests {
         assert!(unsubscribe_refusal(&row).unwrap().starts_with("suspect"));
     }
 }
-
-/// Name of the Claude API key in the OS vault.
-pub const CLAUDE_KEY: &str = "claude-api-key";

@@ -2967,6 +2967,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "log",
+ "mailcraft-ai",
  "mailcraft-graph",
  "mailcraft-html",
  "mailcraft-imap",

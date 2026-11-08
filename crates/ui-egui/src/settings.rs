@@ -96,6 +96,8 @@ pub struct Prefs {
     pub accounts: Accounts,
     pub cleanup: Cleanup,
     pub startup: Startup,
+    /// Optional AI: provider, model, server address (the key is in the OS vault).
+    pub ai: mailcraft_ai::Choice,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
