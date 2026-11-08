@@ -341,6 +341,40 @@ fn cleanup_view_flags_suspects_and_starts_in_simulation() {
 }
 
 #[test]
+fn add_account_dialog_fills_servers_and_needs_a_password() {
+    let mut h = harness(LangPref::Fr);
+    h.run();
+    h.get_by_label("Ajouter un compte").click();
+    h.run();
+    h.get_by_label("Compte Microsoft (Outlook, Hotmail, Live)…");
+    h.get_by_label("Adresse e-mail").focus();
+    h.run();
+    h.get_by_label("Adresse e-mail")
+        .type_text("someone@gmail.com");
+    h.run();
+    h.get_by_label("Serveurs (remplis automatiquement)").click();
+    h.run();
+    assert_eq!(
+        h.get_by_label("Serveur IMAP").value().as_deref(),
+        Some("imap.gmail.com")
+    );
+    assert_eq!(h.get_by_label("Port SMTP").value().as_deref(), Some("465"));
+    // No password yet: nothing can be added.
+    h.get_by_label("Ajouter").click();
+    h.run();
+    h.get_by_label("Adresse e-mail");
+    h.get_by_label("Mot de passe d'application").focus();
+    h.run();
+    h.get_by_label("Mot de passe d'application")
+        .type_text("abcd efgh ijkl mnop");
+    h.run();
+    h.get_by_label("Ajouter").click();
+    h.run();
+    assert!(h.query_by_label("Adresse e-mail").is_none());
+    h.get_by_label("Vérification de l'adresse et du mot de passe…");
+}
+
+#[test]
 fn welcome_assistant_steps_and_options_view() {
     let mut h = harness(LangPref::Fr);
     h.run();

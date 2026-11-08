@@ -753,6 +753,9 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
                 ui.label(small(T::StatusNoAccount.get(lang).into()));
             }
             Status::Ready => {}
+            Status::Connecting => {
+                ui.label(small(T::Connecting.get(lang).into()));
+            }
             Status::SigningIn => {
                 ui.label(small(T::SigningIn.get(lang).into()));
                 if ui.small_button(T::Cancel.get(lang)).clicked() {

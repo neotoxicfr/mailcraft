@@ -1,5 +1,6 @@
 //! MailCraft user interface.
 
+mod account_form;
 mod attachments;
 mod cleanup;
 mod composer;
@@ -293,7 +294,9 @@ impl MailCraftApp {
             match event {
                 Event::SigningIn => {
                     self.mail.signing_in = true;
-                    self.mail.status = Status::SigningIn;
+                    if self.mail.status != Status::Connecting {
+                        self.mail.status = Status::SigningIn;
+                    }
                 }
                 Event::SignInCancelled => {
                     self.mail.signing_in = false;
@@ -395,6 +398,16 @@ impl MailCraftApp {
         match command {
             Command::Exit => return Some(Command::Exit),
             Command::AddAccount => {
+                self.view.dialog = Some(shell::Dialog::AddAccount {
+                    form: Box::default(),
+                });
+            }
+            Command::AddImapAccount { server } => {
+                self.mail.signing_in = true;
+                self.mail.status = Status::Connecting;
+                self.send(Request::AddImapAccount { server });
+            }
+            Command::AddMicrosoftAccount => {
                 self.mail.signing_in = true;
                 self.mail.status = Status::SigningIn;
                 self.send(Request::AddMicrosoftAccount);

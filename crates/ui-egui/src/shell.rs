@@ -92,6 +92,10 @@ pub enum Dialog {
     Welcome {
         step: u8,
     },
+    /// Microsoft sign-in, or an IMAP + SMTP account.
+    AddAccount {
+        form: Box<crate::account_form::Form>,
+    },
     /// Claude's newsletter digest.
     Digest {
         text: String,
@@ -125,7 +129,12 @@ pub enum Pick {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     Exit,
+    /// Opens the "add an account" dialog.
     AddAccount,
+    AddMicrosoftAccount,
+    AddImapAccount {
+        server: Box<mailcraft_imap::Server>,
+    },
     CancelSignIn,
     SyncAll,
     SelectFolder {
@@ -622,6 +631,15 @@ fn dialog(
                         close = true;
                     }
                 });
+            }
+            Dialog::AddAccount { form } => {
+                let mut form = form.clone();
+                let (command, done) = crate::account_form::show(ui, lang, &mut form);
+                if let Some(Dialog::AddAccount { form: f }) = state.as_mut() {
+                    *f = form;
+                }
+                result = command;
+                close = done;
             }
             Dialog::Digest { text } => {
                 ui.heading(T::DigestTitle.get(lang));

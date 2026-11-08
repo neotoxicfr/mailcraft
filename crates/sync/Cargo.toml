@@ -21,3 +21,6 @@ url = { workspace = true }
 open = { workspace = true }
 mailcraft-analysis = { workspace = true }
 mailcraft-ai = { workspace = true }
+mailcraft-imap = { workspace = true }
+imap = { workspace = true }
+lettre = { workspace = true }

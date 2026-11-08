@@ -2,7 +2,9 @@
 //! its own database connection. The UI sends [`Request`]s and reads [`Event`]s, then re-reads
 //! the store.
 
-use std::collections::HashMap;
+mod imap_side;
+
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +35,10 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     AddMicrosoftAccount,
+    /// Checks the IMAP and SMTP sign-in, then adds the account and syncs it.
+    AddImapAccount {
+        server: Box<mailcraft_imap::Server>,
+    },
     SyncAll,
     FetchBody {
         account_id: i64,
@@ -309,6 +315,13 @@ struct Runner {
     quoted: HashMap<String, String>,
     /// Accounts whose address book was read this run.
     contacts_done: std::collections::HashSet<i64>,
+    /// Open IMAP connections, one per account.
+    imap: HashMap<i64, mailcraft_imap::Imap>,
+    servers: HashMap<i64, mailcraft_imap::Server>,
+    /// Gmail views (All Mail, Starred…): listed, never synced.
+    views: HashMap<i64, HashSet<String>>,
+    /// Last IMAP message read in full: (id, bytes).
+    raw: Option<(String, Vec<u8>)>,
 }
 
 impl Runner {
@@ -327,6 +340,10 @@ impl Runner {
             roles: HashMap::new(),
             quoted: HashMap::new(),
             contacts_done: std::collections::HashSet::new(),
+            imap: HashMap::new(),
+            servers: HashMap::new(),
+            views: HashMap::new(),
+            raw: None,
         })
     }
 
@@ -349,7 +366,11 @@ impl Runner {
     }
 
     fn handle(&mut self, request: Request, emit: &dyn Fn(Event)) -> Result<(), String> {
+        let Some(request) = self.handle_imap(request, emit)? else {
+            return Ok(());
+        };
         match request {
+            Request::AddImapAccount { .. } => Ok(()),
             Request::AddMicrosoftAccount => self.add_account(emit),
             Request::SyncAll => {
                 self.flush_pending(emit)?;
@@ -652,6 +673,112 @@ impl Runner {
 
     /// Sends pending changes in order. A network failure keeps them for the next sync; a change
     /// the server refuses is dropped and the folders are synced again so the local copy matches.
+    /// Requests about an IMAP account go to its own code. Gives back the others.
+    fn handle_imap(
+        &mut self,
+        request: Request,
+        emit: &dyn Fn(Event),
+    ) -> Result<Option<Request>, String> {
+        let account_id = match &request {
+            Request::AddImapAccount { server } => {
+                self.add_imap_account(server, emit)?;
+                return Ok(None);
+            }
+            Request::FetchBody { account_id, .. }
+            | Request::FetchInline { account_id, .. }
+            | Request::SaveAttachment { account_id, .. }
+            | Request::CreateFolder { account_id, .. }
+            | Request::RenameFolder { account_id, .. }
+            | Request::DeleteFolder { account_id, .. }
+            | Request::SaveDraft { account_id, .. }
+            | Request::Send { account_id, .. }
+            | Request::DiscardDraft { account_id, .. }
+            | Request::SearchServer { account_id, .. } => *account_id,
+            _ => return Ok(Some(request)),
+        };
+        if !self.is_imap(account_id) {
+            return Ok(Some(request));
+        }
+        match request {
+            Request::FetchBody { id, .. } => {
+                if self
+                    .store
+                    .body(account_id, &id)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    self.imap_fetch_body(account_id, &id)?;
+                }
+                emit(Event::BodyReady { account_id, id });
+            }
+            Request::FetchInline { id, .. } => {
+                let images = self.imap_inline(account_id, &id)?;
+                emit(Event::InlineReady {
+                    account_id,
+                    id,
+                    images,
+                });
+            }
+            Request::SaveAttachment {
+                message_id,
+                attachment_id,
+                path,
+                open,
+                ..
+            } => {
+                let bytes = self.imap_attachment(account_id, &message_id, &attachment_id)?;
+                std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+                if open {
+                    open::that_detached(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                }
+                emit(Event::AttachmentSaved { path });
+            }
+            Request::CreateFolder { parent, name, .. } => {
+                self.imap_create_folder(account_id, parent.as_deref(), &name)?;
+                self.imap_refresh_folders(account_id, emit)?;
+            }
+            Request::RenameFolder { id, name, .. } => {
+                self.imap_rename_folder(account_id, &id, &name)?;
+                self.imap_sync_account(account_id, emit)?;
+            }
+            Request::DeleteFolder { id, .. } => {
+                self.imap_delete_folder(account_id, &id)?;
+                self.imap_sync_account(account_id, emit)?;
+            }
+            Request::SaveDraft {
+                composer,
+                base,
+                draft_id,
+                out,
+                ..
+            } => {
+                let draft_id = self.imap_save_draft(account_id, &base, draft_id, &out)?;
+                emit(Event::DraftSaved { composer, draft_id });
+            }
+            Request::Send {
+                composer,
+                base,
+                draft_id,
+                out,
+                attachments,
+                ..
+            } => match self.imap_send(account_id, &base, draft_id, &out, &attachments) {
+                Ok(()) => emit(Event::Sent { composer }),
+                Err(error) => emit(Event::SendFailed { composer, error }),
+            },
+            Request::DiscardDraft { draft_id, .. } => {
+                self.imap_discard_draft(account_id, &draft_id)?;
+            }
+            Request::SearchServer { query, .. } => {
+                let found = self.imap_search(account_id, &query)?;
+                emit(Event::Changed);
+                emit(Event::ServerSearchDone { found });
+            }
+            other => return Ok(Some(other)),
+        }
+        Ok(None)
+    }
+
     fn flush_pending(&mut self, emit: &dyn Fn(Event)) -> Result<(), String> {
         let mut refused = Vec::new();
         for (pid, account_id, json) in self.store.pending().map_err(|e| e.to_string())? {
@@ -659,18 +786,31 @@ impl Runner {
                 self.store.drop_pending(pid).map_err(|e| e.to_string())?;
                 continue;
             };
-            match self.try_graph(account_id, |g| g.apply(&op.op())) {
-                Ok(_) | Err(GraphError::NotFound) => {}
-                Err(GraphError::Network(e)) => {
+            let result = if self.is_imap(account_id) {
+                match self.imap_apply(account_id, &op) {
+                    Ok(()) | Err(mailcraft_imap::Error::NotFound) => Ok(()),
+                    Err(mailcraft_imap::Error::Network(e)) => Err((true, e)),
+                    Err(e) => Err((false, e.to_string())),
+                }
+            } else {
+                match self.try_graph(account_id, |g| g.apply(&op.op())) {
+                    Ok(_) | Err(GraphError::NotFound) => Ok(()),
+                    Err(GraphError::Network(e)) => Err((true, e)),
+                    Err(e) => Err((false, e.to_string())),
+                }
+            };
+            match result {
+                Ok(()) => {}
+                Err((true, e)) => {
                     emit(Event::Offline {
                         pending: self.store.pending().map_or(0, |p| p.len()),
                         reason: e,
                     });
                     return Ok(());
                 }
-                Err(e) => {
+                Err((false, e)) => {
                     refused.push(account_id);
-                    emit(Event::Error(e.to_string()));
+                    emit(Event::Error(e));
                 }
             }
             self.store.drop_pending(pid).map_err(|e| e.to_string())?;
@@ -778,6 +918,9 @@ impl Runner {
         account_id: i64,
         emit: &dyn Fn(Event),
     ) -> Result<Vec<Folder>, String> {
+        if self.is_imap(account_id) {
+            return self.imap_refresh_folders(account_id, emit);
+        }
         if !self.roles.contains_key(&account_id) {
             let mut roles = HashMap::new();
             for role in ROLES {
@@ -809,6 +952,9 @@ impl Runner {
     }
 
     fn sync_account(&mut self, account_id: i64, emit: &dyn Fn(Event)) -> Result<(), String> {
+        if self.is_imap(account_id) {
+            return self.imap_sync_account(account_id, emit);
+        }
         let folders = self.refresh_folders(account_id, emit)?;
         self.sync_folders(account_id, &folders, emit)?;
         if self.contacts_done.insert(account_id) {
@@ -858,10 +1004,17 @@ impl Runner {
                     else {
                         continue;
                     };
-                    match self.try_graph(account_id, |g| g.headers(&id)) {
-                        Ok(h) => h,
-                        Err(GraphError::NotFound) => continue,
-                        Err(e) => return Err(e.to_string()),
+                    if self.is_imap(account_id) {
+                        match self.imap_headers(account_id, &id)? {
+                            Some(h) => h,
+                            None => continue,
+                        }
+                    } else {
+                        match self.try_graph(account_id, |g| g.headers(&id)) {
+                            Ok(h) => h,
+                            Err(GraphError::NotFound) => continue,
+                            Err(e) => return Err(e.to_string()),
+                        }
                     }
                 }
             };
@@ -1095,6 +1248,8 @@ impl Runner {
                     {
                         let r = if dry_run {
                             Ok(())
+                        } else if self.is_imap(account_id) {
+                            self.imap_send_plain(account_id, &to, &subject, "unsubscribe")
                         } else {
                             self.with_graph(account_id, |g| {
                                 g.send_plain(&to, &subject, "unsubscribe")
@@ -1141,14 +1296,30 @@ impl Runner {
                         _ => "junkemail",
                     };
                     let dest = self.role_folder(account_id, role, emit)?;
-                    let ids: Vec<String> = self
-                        .with_graph(account_id, |g| g.messages_from(address))?
+                    let imap = self.is_imap(account_id);
+                    let found = if imap {
+                        self.imap_messages_from(account_id, address)?
+                    } else {
+                        self.with_graph(account_id, |g| g.messages_from(address))?
+                    };
+                    let ids: Vec<String> = found
                         .into_iter()
                         .filter(|(_, folder)| *folder != dest)
                         .map(|(id, _)| id)
                         .collect();
                     if !dry_run {
                         for id in &ids {
+                            if imap {
+                                let op = PendingOp::Move {
+                                    id: id.clone(),
+                                    dest: dest.clone(),
+                                };
+                                match self.imap_apply(account_id, &op) {
+                                    Ok(()) | Err(mailcraft_imap::Error::NotFound) => {}
+                                    Err(e) => return Err(e.to_string()),
+                                }
+                                continue;
+                            }
                             match self
                                 .try_graph(account_id, |g| g.apply(&Op::Move { id, dest: &dest }))
                             {
@@ -1160,7 +1331,10 @@ impl Runner {
                             .move_local(account_id, &ids, &dest)
                             .map_err(|e| e.to_string())?;
                         if action == CleanAction::Block {
-                            self.with_graph(account_id, |g| g.block_rule(address, &dest))?;
+                            // IMAP has no server rules: MailCraft files their new mail at sync.
+                            if !imap {
+                                self.with_graph(account_id, |g| g.block_rule(address, &dest))?;
+                            }
                             self.store
                                 .mark_blocked(account_id, address)
                                 .map_err(|e| e.to_string())?;
@@ -1187,6 +1361,9 @@ impl Runner {
     /// Reads the address book for completion. Needs Contacts.Read, which accounts added before
     /// it was asked for do not have: then completion uses known senders only, silently.
     fn sync_contacts(&mut self, account_id: i64) {
+        if self.is_imap(account_id) {
+            return;
+        }
         let Ok(Some(refresh)) = self.store.refresh_token(account_id) else {
             return;
         };

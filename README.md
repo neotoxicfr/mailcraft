@@ -33,10 +33,16 @@ Claude to classify senders when an API key is set (optional).
   notification area, one running instance, new-mail notifications, MSI installer (built by the
   Release workflow).
 
+- Milestone 6: with an Anthropic API key (optional, kept in Windows Credential Manager), Claude
+  sorts the senders of the clean-up view and summarises the last day of newsletters.
+- Milestone 4: other accounts over IMAP + SMTP with an app password: Gmail, Yahoo, iCloud,
+  Orange, Free, La Poste, SFR, GMX, AOL or any server (filled in from the address). Same
+  features as Microsoft accounts; blocking a sender files its new mail in Junk at each sync.
+
 ## Planned
 
-- Claude classification of senders (optional API key) and a daily newsletter digest.
-- Gmail and generic IMAP/SMTP accounts.
+- Gmail sign-in in the browser (OAuth) instead of an app password.
+- Calendar and contacts.
 
 ## Build
 

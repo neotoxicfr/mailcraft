@@ -19,6 +19,13 @@ mailcraft-sync = { path = "crates/sync" }
 mailcraft-html = { path = "crates/html" }
 mailcraft-analysis = { path = "crates/analysis" }
 mailcraft-ai = { path = "crates/ai" }
+mailcraft-imap = { path = "crates/imap" }
+# IMAP + SMTP accounts: TLS through our own rustls (ring) stream, no native-tls/OpenSSL
+imap = { version = "=3.0.0-alpha.15", default-features = false }
+imap-proto = "0.16"
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "hostname", "rustls", "ring", "rustls-platform-verifier"] }
+mail-parser = "1.0.1"
+rustls-platform-verifier = "0.7"
 
 # reading: HTML parsing, original view (Edge WebView2), attachments
 scraper = { version = "0.29", default-features = false }

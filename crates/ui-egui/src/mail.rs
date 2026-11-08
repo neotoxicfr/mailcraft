@@ -16,6 +16,8 @@ pub enum Status {
     #[default]
     Ready,
     SigningIn,
+    /// Checking the address and password of an IMAP account.
+    Connecting,
     Syncing {
         folder: String,
         messages: usize,
