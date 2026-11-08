@@ -218,10 +218,69 @@ fn folder_row(
     });
 }
 
+/// Fluent persona colours, darkened where needed so white initials stay readable.
+const AVATAR_COLOURS: [Color32; 10] = [
+    Color32::from_rgb(0xD1, 0x34, 0x38),
+    Color32::from_rgb(0xCA, 0x50, 0x10),
+    Color32::from_rgb(0x49, 0x82, 0x05),
+    Color32::from_rgb(0x03, 0x83, 0x87),
+    Color32::from_rgb(0x00, 0x78, 0xD4),
+    Color32::from_rgb(0x87, 0x64, 0xB8),
+    Color32::from_rgb(0xC2, 0x39, 0xB3),
+    Color32::from_rgb(0x69, 0x79, 0x7E),
+    Color32::from_rgb(0x98, 0x6F, 0x0B),
+    Color32::from_rgb(0x4F, 0x6B, 0xED),
+];
+
+/// "Alex Dupont" → "AD"; an address alone → its first letter.
+pub fn initials(name: &str, address: &str) -> String {
+    let letters: String = name
+        .split_whitespace()
+        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .collect();
+    let letters = if letters.is_empty() {
+        address
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .into_iter()
+            .collect()
+    } else {
+        letters
+    };
+    letters.to_uppercase()
+}
+
+/// Decorative circle with the sender's initials; the colour follows the address.
+fn avatar(ui: &mut Ui, name: &str, address: &str) {
+    let size = 40.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+    let hash = address
+        .to_lowercase()
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+    let fill = crate::theme::readable(
+        AVATAR_COLOURS[hash as usize % AVATAR_COLOURS.len()],
+        &[Color32::WHITE],
+        crate::theme::MIN_CONTRAST,
+    );
+    ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initials(name, address),
+        semibold(15.0),
+        Color32::WHITE,
+    );
+}
+
 fn paint_selection(ui: &Ui, c: &Ctx<'_>, rect: Rect, selected: bool, hovered: bool) {
     if selected {
-        ui.painter()
-            .rect_filled(rect, 2.0, c.accent.gamma_multiply(0.22));
+        ui.painter().rect_filled(
+            rect,
+            2.0,
+            c.accent.gamma_multiply(crate::theme::SELECTION_TINT),
+        );
     } else if hovered {
         ui.painter()
             .rect_filled(rect, 2.0, c.accent.gamma_multiply(0.08));
@@ -464,7 +523,7 @@ fn message_row(
         let text = format!("{n} {}", T::ItemsWord.get(c.lang));
         let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
         let r = Rect::from_min_size(pointer + vec2(14.0, 10.0), galley.size() + vec2(12.0, 6.0));
-        painter.rect_filled(r, 3.0, c.accent);
+        painter.rect_filled(r, 3.0, c.accent_fill);
         painter.galley(r.min + vec2(6.0, 3.0), galley, Color32::WHITE);
     }
     let lang = c.lang;
@@ -588,29 +647,38 @@ pub fn reading_pane(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, command: &mut Opt
     };
     ui.add(egui::Label::new(RichText::new(subject).font(semibold(18.0))).wrap());
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        let sender = if m.from_name.is_empty() {
-            m.from_addr.clone()
-        } else {
-            format!("{} <{}>", m.from_name, m.from_addr)
-        };
-        ui.add(egui::Label::new(RichText::new(sender).font(semibold(13.5))).selectable(true));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(long_date(m.received, c.lang)).weak());
+    // Outlook layout: the sender's initials in a circle, name, recipients and date beside it.
+    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+        avatar(ui, &m.from_name, &m.from_addr);
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let sender = if m.from_name.is_empty() {
+                    m.from_addr.clone()
+                } else {
+                    format!("{} <{}>", m.from_name, m.from_addr)
+                };
+                ui.add(
+                    egui::Label::new(RichText::new(sender).font(semibold(13.5))).selectable(true),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(long_date(m.received, c.lang)).weak());
+                });
+            });
+            if let Some(body) = &c.mail.body {
+                for (label, value) in [(T::To, &body.to), (T::Cc, &body.cc)] {
+                    if !value.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{} : {value}", label.get(c.lang))).weak(),
+                            )
+                            .wrap(),
+                        );
+                    }
+                }
+            }
         });
     });
-    if let Some(body) = &c.mail.body {
-        for (label, value) in [(T::To, &body.to), (T::Cc, &body.cc)] {
-            if !value.is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{} : {value}", label.get(c.lang))).weak(),
-                    )
-                    .wrap(),
-                );
-            }
-        }
-    }
     if c.mail
         .folder
         .as_ref()

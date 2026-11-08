@@ -240,7 +240,10 @@ pub enum Command {
 /// Everything a frame needs besides the mutable state.
 pub struct Ctx<'a> {
     pub lang: Lang,
+    /// Accent for text and icons, readable on the panes of the current theme.
     pub accent: Color32,
+    /// Accent for solid fills under white text.
+    pub accent_fill: Color32,
     pub mail: &'a Mail,
     pub save_error: Option<&'a str>,
     /// Remote images stay blocked (tracker blocker on).
@@ -260,7 +263,7 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
     Panel::top("tabs")
         .frame(
             Frame::NONE
-                .fill(c.accent)
+                .fill(c.accent_fill)
                 .inner_margin(Margin::symmetric(6, 0)),
         )
         .show(ui, |ui| tab_row(ui, c, view, dark));
@@ -751,7 +754,7 @@ fn tab_row(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, dark: bool) {
             let (fill, text_color) = if selected {
                 (theme::ribbon_fill(dark), c.accent)
             } else if response.hovered() {
-                (c.accent.gamma_multiply(0.8), Color32::WHITE)
+                (c.accent_fill.gamma_multiply(0.8), Color32::WHITE)
             } else {
                 (Color32::TRANSPARENT, Color32::WHITE)
             };

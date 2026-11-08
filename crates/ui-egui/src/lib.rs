@@ -220,9 +220,11 @@ impl MailCraftApp {
         let command = {
             let store = self.backend.as_ref().map(|b| &b.store);
             let suggest = store.map(suggester);
+            let accent_fill = theme::accent_fill(prefs.appearance.accent);
             let c = shell::Ctx {
                 lang: Lang::resolve(prefs.general.language),
-                accent: theme::accent(prefs.appearance.accent),
+                accent: theme::accent_text(accent_fill, ui.visuals().dark_mode),
+                accent_fill,
                 mail: &self.mail,
                 save_error: self.save_error.as_deref(),
                 block_images: prefs.privacy.block_remote_images,
@@ -1025,7 +1027,8 @@ impl MailCraftApp {
     /// Detached composers, each in its own window (viewport).
     fn composer_windows(&mut self, ctx: &Context, prefs: &Prefs) -> Option<Command> {
         let lang = Lang::resolve(prefs.general.language);
-        let accent = theme::accent(prefs.appearance.accent);
+        let accent_fill = theme::accent_fill(prefs.appearance.accent);
+        let accent = theme::accent_text(accent_fill, ctx.theme() == egui::Theme::Dark);
         let mut out = None;
         let mail = &self.mail;
         let store = self.backend.as_ref().map(|b| &b.store);
@@ -1048,6 +1051,7 @@ impl MailCraftApp {
                     let c = shell::Ctx {
                         lang,
                         accent,
+                        accent_fill,
                         mail,
                         save_error: None,
                         block_images: prefs.privacy.block_remote_images,

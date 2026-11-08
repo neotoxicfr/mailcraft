@@ -151,7 +151,7 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, comp: &mut Composer) -> Option<Action> {
     }
     ui.horizontal(|ui| {
         let send = egui::Button::new(RichText::new(T::Send.get(lang)).color(Color32::WHITE))
-            .fill(c.accent);
+            .fill(c.accent_fill);
         if ui.add_enabled(!comp.sending, send).clicked() {
             action = Some(Action::Send);
         }

@@ -32,6 +32,6 @@ image = { workspace = true }
 winreg = "0.55"
 
 [dev-dependencies]
-egui_kittest = { workspace = true }
+egui_kittest = { workspace = true, features = ["wgpu"] }
 tempfile = { workspace = true }
 craft-settings = { workspace = true }
