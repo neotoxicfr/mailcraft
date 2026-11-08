@@ -2,7 +2,7 @@
 
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
 
 use crate::{Error, Result, Server};
@@ -90,6 +90,15 @@ pub fn build(from: &Server, m: &Mail<'_>) -> Result<Message> {
     message.map_err(|e| Error::Refused(e.to_string()))
 }
 
+/// XOAUTH2 for browser sign-ins, the usual password mechanisms otherwise.
+fn mechanisms(server: &Server) -> Vec<Mechanism> {
+    if server.oauth {
+        vec![Mechanism::Xoauth2]
+    } else {
+        vec![Mechanism::Plain, Mechanism::Login]
+    }
+}
+
 pub fn send(server: &Server, message: &Message) -> Result<()> {
     let user = if server.user.is_empty() {
         &server.email
@@ -105,6 +114,7 @@ pub fn send(server: &Server, message: &Message) -> Result<()> {
     let transport = builder
         .port(server.smtp_port)
         .credentials(Credentials::new(user.clone(), server.password.clone()))
+        .authentication(mechanisms(server))
         .timeout(Some(std::time::Duration::from_secs(60)))
         .build();
     transport.send(message).map(|_| ()).map_err(|e| {
@@ -132,6 +142,7 @@ pub fn check(server: &Server) -> Result<()> {
     let ok = builder
         .port(server.smtp_port)
         .credentials(Credentials::new(user.clone(), server.password.clone()))
+        .authentication(mechanisms(server))
         .timeout(Some(std::time::Duration::from_secs(30)))
         .build()
         .test_connection()

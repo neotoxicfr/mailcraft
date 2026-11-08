@@ -3,9 +3,11 @@
 //! the store.
 
 mod automation;
+mod google;
 mod imap_side;
 
 pub use automation::{Away, Rule, RuleAction};
+pub use google::configured as google_configured;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -57,6 +59,8 @@ pub enum Request {
     SetAway {
         away: Away,
     },
+    /// Gmail through the browser sign-in (only when [`google_configured`]).
+    AddGoogleAccount,
     /// Checks the IMAP and SMTP sign-in, then adds the account and syncs it.
     AddImapAccount {
         server: Box<mailcraft_imap::Server>,
@@ -312,7 +316,10 @@ impl Worker {
     }
 
     pub fn send(&self, request: Request) {
-        if request == Request::AddMicrosoftAccount {
+        if matches!(
+            request,
+            Request::AddMicrosoftAccount | Request::AddGoogleAccount
+        ) {
             self.cancel.store(false, Ordering::Relaxed);
         }
         let _ = self.tx.send(request);
@@ -415,6 +422,7 @@ impl Runner {
         };
         match request {
             Request::AddImapAccount { .. } => Ok(()),
+            Request::AddGoogleAccount => self.add_google_account(emit),
             Request::SetAutomation { rules, away } => {
                 self.rules = rules;
                 self.away = Some(away);

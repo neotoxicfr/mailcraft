@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 
 /// MailCraft's app registration (public client: an identifier, not a secret).
 pub const DEFAULT_CLIENT_ID: &str = "ca8a6658-b155-4705-8186-a72a35a00f1c";
-const AUTHORITY: &str = "https://login.microsoftonline.com/common/oauth2/v2.0";
 /// Asked at sign-in. Contacts.Read came later (address completion): accounts added before it
 /// keep working without it, so sessions are refreshed with [`MAIL_SCOPES`] only.
 pub const SCOPES: &str =
@@ -73,11 +72,50 @@ fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
+/// An OAuth 2.0 provider for a desktop app (authorization code + PKCE, loopback redirect).
+pub struct OAuth<'a> {
+    pub authorize_url: &'a str,
+    pub token_url: &'a str,
+    pub client_id: &'a str,
+    /// Google requires its "client secret" even for desktop apps (it is not secret there).
+    pub client_secret: Option<&'a str>,
+    pub scopes: &'a str,
+    /// More parameters for the sign-in page.
+    pub extra: &'a [(&'a str, &'a str)],
+}
+
+fn microsoft<'a>(client_id: &'a str, scopes: &'a str) -> OAuth<'a> {
+    OAuth {
+        authorize_url: concat!(
+            "https://login.microsoftonline.com/common/oauth2/v2.0",
+            "/authorize"
+        ),
+        token_url: concat!(
+            "https://login.microsoftonline.com/common/oauth2/v2.0",
+            "/token"
+        ),
+        client_id,
+        client_secret: None,
+        scopes,
+        extra: &[("response_mode", "query"), ("prompt", "select_account")],
+    }
+}
+
 /// Opens the browser on Microsoft's sign-in page and waits for the redirect (or `timeout`).
 /// `cancel` is polled so the user can give up from the app.
 pub fn sign_in(
     http: &Client,
     client_id: &str,
+    timeout: Duration,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Tokens, AuthError> {
+    sign_in_with(http, &microsoft(client_id, SCOPES), timeout, cancel)
+}
+
+/// Same sign-in with any provider.
+pub fn sign_in_with(
+    http: &Client,
+    o: &OAuth<'_>,
     timeout: Duration,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Tokens, AuthError> {
@@ -90,36 +128,35 @@ pub fn sign_in(
     let redirect = format!("http://localhost:{port}");
     let verifier = random_b64(32)?;
     let state = random_b64(16)?;
-    let url = url::Url::parse_with_params(
-        &format!("{AUTHORITY}/authorize"),
-        [
-            ("client_id", client_id),
-            ("response_type", "code"),
-            ("redirect_uri", redirect.as_str()),
-            ("response_mode", "query"),
-            ("scope", SCOPES),
-            ("state", state.as_str()),
-            ("code_challenge", challenge(&verifier).as_str()),
-            ("code_challenge_method", "S256"),
-            ("prompt", "select_account"),
-        ],
-    )
-    .map_err(|e| AuthError::Local(e.to_string()))?;
+    let code_challenge = challenge(&verifier);
+    let mut params = vec![
+        ("client_id", o.client_id),
+        ("response_type", "code"),
+        ("redirect_uri", redirect.as_str()),
+        ("scope", o.scopes),
+        ("state", state.as_str()),
+        ("code_challenge", code_challenge.as_str()),
+        ("code_challenge_method", "S256"),
+    ];
+    params.extend_from_slice(o.extra);
+    let url = url::Url::parse_with_params(o.authorize_url, params)
+        .map_err(|e| AuthError::Local(e.to_string()))?;
     webbrowser::open(url.as_str())
         .map_err(|e| AuthError::Local(format!("cannot open the browser: {e}")))?;
 
     let code = wait_for_code(&listener, &state, Instant::now() + timeout, cancel)?;
-    token_request(
-        http,
-        &[
-            ("client_id", client_id),
-            ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("redirect_uri", redirect.as_str()),
-            ("code_verifier", verifier.as_str()),
-            ("scope", SCOPES),
-        ],
-    )
+    let mut form = vec![
+        ("client_id", o.client_id),
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("redirect_uri", redirect.as_str()),
+        ("code_verifier", verifier.as_str()),
+        ("scope", o.scopes),
+    ];
+    if let Some(secret) = o.client_secret {
+        form.push(("client_secret", secret));
+    }
+    token_request(http, o.token_url, &form)
 }
 
 /// New access token from a refresh token, for `scopes` (usually [`MAIL_SCOPES`]). Microsoft may
@@ -130,16 +167,25 @@ pub fn refresh(
     refresh_token: &str,
     scopes: &str,
 ) -> Result<Tokens, AuthError> {
-    token_request(
-        http,
-        &[
-            ("client_id", client_id),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("scope", scopes),
-        ],
-    )
-    .map(|mut t| {
+    refresh_with(http, &microsoft(client_id, scopes), refresh_token)
+}
+
+/// New access token with any provider; keeps the old refresh token when none comes back.
+pub fn refresh_with(
+    http: &Client,
+    o: &OAuth<'_>,
+    refresh_token: &str,
+) -> Result<Tokens, AuthError> {
+    let mut form = vec![
+        ("client_id", o.client_id),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("scope", o.scopes),
+    ];
+    if let Some(secret) = o.client_secret {
+        form.push(("client_secret", secret));
+    }
+    token_request(http, o.token_url, &form).map(|mut t| {
         if t.refresh.is_empty() {
             t.refresh = refresh_token.to_owned();
         }
@@ -147,9 +193,9 @@ pub fn refresh(
     })
 }
 
-fn token_request(http: &Client, form: &[(&str, &str)]) -> Result<Tokens, AuthError> {
+fn token_request(http: &Client, url: &str, form: &[(&str, &str)]) -> Result<Tokens, AuthError> {
     let resp = http
-        .post(format!("{AUTHORITY}/token"))
+        .post(url)
         .form(form)
         .send()
         .map_err(|e| AuthError::Network(e.to_string()))?;

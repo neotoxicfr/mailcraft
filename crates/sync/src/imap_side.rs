@@ -42,7 +42,19 @@ impl Runner {
         })
     }
 
+    /// The account's server entry, ready to connect: for a Google sign-in, `password` holds a
+    /// fresh access token.
     fn server(&mut self, account_id: i64) -> Result<Server, ImapError> {
+        let mut server = self.stored_server(account_id)?;
+        if server.oauth {
+            server.password = self
+                .google_access(account_id, &server)
+                .map_err(ImapError::Auth)?;
+        }
+        Ok(server)
+    }
+
+    fn stored_server(&mut self, account_id: i64) -> Result<Server, ImapError> {
         if let Some(s) = self.servers.get(&account_id) {
             return Ok(s.clone());
         }
@@ -105,6 +117,7 @@ impl Runner {
             return Err(e.to_string());
         }
         let secret = serde_json::to_string(server).map_err(|e| e.to_string())?;
+        // (App-password accounts: the password itself is what is sealed.)
         let name = if server.name.trim().is_empty() {
             server.email.clone()
         } else {

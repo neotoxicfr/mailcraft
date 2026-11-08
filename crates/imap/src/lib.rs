@@ -39,6 +39,12 @@ pub struct Server {
     pub imap_port: u16,
     pub smtp_host: String,
     pub smtp_port: u16,
+    /// Signed in through the browser (Google): `password` then carries a short-lived access
+    /// token at connection time, and `refresh` the long-lived token kept sealed.
+    #[serde(default)]
+    pub oauth: bool,
+    #[serde(default)]
+    pub refresh: String,
 }
 
 impl fmt::Debug for Server {
@@ -324,10 +330,23 @@ impl Imap {
         let mut client = imap::Client::new(tls_stream(&s.imap_host, s.imap_port)?);
         client.read_greeting().map_err(Error::from)?;
         let user = if s.user.is_empty() { &s.email } else { &s.user };
-        let mut session = client.login(user, &s.password).map_err(|(e, _)| match e {
+        let refused = |(e, _)| match e {
             imap::Error::No(n) => Error::Auth(n.information),
             e => Error::from(e),
-        })?;
+        };
+        let mut session = if s.oauth {
+            client
+                .authenticate(
+                    "XOAUTH2",
+                    &XOauth2 {
+                        user: user.to_owned(),
+                        token: s.password.clone(),
+                    },
+                )
+                .map_err(refused)?
+        } else {
+            client.login(user, &s.password).map_err(refused)?
+        };
         let can_move = session
             .capabilities()
             .map(|c| c.has_str("MOVE"))
@@ -686,6 +705,20 @@ impl Imap {
             .into_iter()
             .map(|u| message_id(v, u, mailbox))
             .collect())
+    }
+}
+
+/// SASL XOAUTH2 (Gmail): the user and a bearer token.
+struct XOauth2 {
+    user: String,
+    token: String,
+}
+
+impl imap::Authenticator for XOauth2 {
+    type Response = String;
+
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.token)
     }
 }
 

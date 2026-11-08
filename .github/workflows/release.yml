@@ -29,6 +29,10 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: packaging/windows/package.ps1 -Version ${{ steps.version.outputs.value }}
+        env:
+          # Google sign-in for Gmail (optional): identifiers of the project, kept as secrets.
+          MAILCRAFT_GOOGLE_CLIENT_ID: ${{ secrets.MAILCRAFT_GOOGLE_CLIENT_ID }}
+          MAILCRAFT_GOOGLE_CLIENT_SECRET: ${{ secrets.MAILCRAFT_GOOGLE_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v7
         with:
           name: mailcraft-msi

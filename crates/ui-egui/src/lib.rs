@@ -477,6 +477,11 @@ impl MailCraftApp {
                 self.mail.status = Status::Connecting;
                 self.send(Request::AddImapAccount { server });
             }
+            Command::AddGoogleAccount => {
+                self.mail.signing_in = true;
+                self.mail.status = Status::SigningIn;
+                self.send(Request::AddGoogleAccount);
+            }
             Command::AddMicrosoftAccount => {
                 self.mail.signing_in = true;
                 self.mail.status = Status::SigningIn;

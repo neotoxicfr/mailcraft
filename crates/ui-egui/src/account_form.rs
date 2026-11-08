@@ -78,6 +78,7 @@ impl Form {
             imap_port,
             smtp_host: smtp_host.to_owned(),
             smtp_port,
+            ..Server::default()
         })
     }
 }
@@ -102,6 +103,10 @@ pub fn show(ui: &mut Ui, lang: Lang, form: &mut Form) -> (Option<Command>, bool)
     ui.add_space(4.0);
     if ui.button(T::MicrosoftAccount.get(lang)).clicked() {
         result = Some(Command::AddMicrosoftAccount);
+        close = true;
+    }
+    if mailcraft_sync::google_configured() && ui.button(T::GoogleAccount.get(lang)).clicked() {
+        result = Some(Command::AddGoogleAccount);
         close = true;
     }
     ui.add_space(6.0);

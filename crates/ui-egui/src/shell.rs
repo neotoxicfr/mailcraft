@@ -149,6 +149,7 @@ pub enum Command {
     /// Opens the "add an account" dialog.
     AddAccount,
     AddMicrosoftAccount,
+    AddGoogleAccount,
     AddImapAccount {
         server: Box<mailcraft_imap::Server>,
     },
