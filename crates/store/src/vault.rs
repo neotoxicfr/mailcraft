@@ -50,7 +50,7 @@ impl MasterKey {
 
     /// Reads the key from the OS vault, creating and storing it on first use.
     pub fn load_or_create() -> Result<Self, VaultError> {
-        let entry = os_entry()?;
+        let entry = os_entry(USER)?;
         match entry.get_secret() {
             Ok(bytes) => bytes.try_into().map(Self).map_err(|_| VaultError::Corrupt),
             Err(keyring_core::Error::NoEntry) => {
@@ -99,7 +99,7 @@ impl MasterKey {
     }
 }
 
-fn os_entry() -> Result<keyring_core::Entry, VaultError> {
+fn os_entry(user: &str) -> Result<keyring_core::Entry, VaultError> {
     #[cfg(windows)]
     {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -112,7 +112,29 @@ fn os_entry() -> Result<keyring_core::Entry, VaultError> {
             return Err(VaultError::Os(e));
         }
     }
-    keyring_core::Entry::new(SERVICE, USER).map_err(|e| VaultError::Os(e.to_string()))
+    keyring_core::Entry::new(SERVICE, user).map_err(|e| VaultError::Os(e.to_string()))
+}
+
+/// A named secret in the OS vault (the Claude API key), `None` when not set.
+pub fn secret(name: &str) -> Result<Option<String>, VaultError> {
+    match os_entry(name)?.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
+        Err(e) => Err(VaultError::Os(e.to_string())),
+    }
+}
+
+pub fn set_secret(name: &str, value: &str) -> Result<(), VaultError> {
+    os_entry(name)?
+        .set_password(value)
+        .map_err(|e| VaultError::Os(e.to_string()))
+}
+
+pub fn delete_secret(name: &str) -> Result<(), VaultError> {
+    match os_entry(name)?.delete_credential() {
+        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+        Err(e) => Err(VaultError::Os(e.to_string())),
+    }
 }
 
 #[cfg(test)]

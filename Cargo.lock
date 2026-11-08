@@ -2727,6 +2727,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mailcraft-ai"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mailcraft-analysis"
 version = "0.1.0"
 dependencies = [
@@ -2775,6 +2785,7 @@ name = "mailcraft-sync"
 version = "0.1.0"
 dependencies = [
  "log",
+ "mailcraft-ai",
  "mailcraft-analysis",
  "mailcraft-graph",
  "mailcraft-html",

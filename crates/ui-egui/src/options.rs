@@ -4,7 +4,7 @@ use egui::{RichText, Ui};
 
 use crate::i18n::T;
 use crate::settings::Prefs;
-use crate::shell::{Command, Ctx, Dialog};
+use crate::shell::{Command, Ctx, Dialog, View};
 
 /// Months offered for the first sync of a folder ("everything" is 120).
 pub const MONTHS: [u32; 6] = [1, 3, 6, 12, 24, 120];
@@ -15,12 +15,7 @@ fn section(ui: &mut Ui, title: T, lang: crate::i18n::Lang) {
     ui.separator();
 }
 
-pub fn show(
-    ui: &mut Ui,
-    c: &Ctx<'_>,
-    prefs: &mut Prefs,
-    dialog: &mut Option<Dialog>,
-) -> Option<Command> {
+pub fn show(ui: &mut Ui, c: &Ctx<'_>, prefs: &mut Prefs, view: &mut View) -> Option<Command> {
     let lang = c.lang;
     let mut command = None;
     ui.horizontal(|ui| {
@@ -45,7 +40,7 @@ pub fn show(
                     ui.label(RichText::new(&a.email).strong());
                     ui.label(RichText::new(&a.name).weak());
                     if ui.small_button(T::RemoveAccount.get(lang)).clicked() {
-                        *dialog = Some(Dialog::ConfirmRemoveAccount {
+                        view.dialog = Some(Dialog::ConfirmRemoveAccount {
                             account_id: a.id,
                             email: a.email.clone(),
                         });
@@ -115,9 +110,43 @@ pub fn show(
                 prefs.cleanup.screener_since = chrono::Utc::now().timestamp();
             }
             if ui.button(T::AllowList.get(lang)).clicked() {
-                *dialog = Some(Dialog::AllowList {
+                view.dialog = Some(Dialog::AllowList {
                     text: prefs.cleanup.allow_list.join("\n"),
                 });
+            }
+
+            section(ui, T::ClaudeSection, lang);
+            ui.label(RichText::new(T::ClaudeHelp.get(lang)).small());
+            match view.claude_key_saved {
+                Some(true) => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(T::ClaudeKeySaved.get(lang)).strong());
+                        if ui.button(T::ClaudeKeyDelete.get(lang)).clicked() {
+                            command = Some(Command::DeleteClaudeKey);
+                        }
+                    });
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        let l = ui.label(T::ClaudeKey.get(lang));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut view.claude_key)
+                                .password(true)
+                                .hint_text("sk-ant-…")
+                                .desired_width(280.0),
+                        )
+                        .labelled_by(l.id);
+                        let ok = view.claude_key.trim().starts_with("sk-ant-");
+                        if ui
+                            .add_enabled(ok, egui::Button::new(T::ClaudeKeySave.get(lang)))
+                            .clicked()
+                        {
+                            command = Some(Command::SaveClaudeKey {
+                                key: std::mem::take(&mut view.claude_key),
+                            });
+                        }
+                    });
+                }
             }
 
             section(ui, T::StartupSection, lang);

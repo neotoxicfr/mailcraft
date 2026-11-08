@@ -785,6 +785,9 @@ pub fn status_bar(ui: &mut Ui, c: &Ctx<'_>, command: &mut Option<Command>) {
             Status::RebuildScheduled => {
                 ui.label(small(T::RebuildScheduled.get(lang).into()));
             }
+            Status::ClassifyDone(n) => {
+                ui.label(small(format!("{n} {}", T::ClassifyDone.get(lang))));
+            }
             Status::Sent => {
                 ui.label(small(T::Sent.get(lang).into()));
             }

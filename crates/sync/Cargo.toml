@@ -20,3 +20,4 @@ mailcraft-html = { workspace = true }
 url = { workspace = true }
 open = { workspace = true }
 mailcraft-analysis = { workspace = true }
+mailcraft-ai = { workspace = true }

@@ -22,6 +22,7 @@ pub enum Status {
     },
     UpToDate,
     SearchingServer,
+    ClassifyDone(usize),
     RebuildScheduled,
     CleanupDone {
         done: usize,
@@ -67,6 +68,7 @@ pub struct Mail {
     pub senders: Vec<mailcraft_store::SenderRow>,
     pub actions: Vec<mailcraft_store::ActionEntry>,
     pub analyzing: Option<(usize, usize)>,
+    pub classifying: Option<(usize, usize)>,
     /// Senders waiting in the screener (when it is on).
     pub screening: usize,
     pub status: Status,

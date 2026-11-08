@@ -366,6 +366,15 @@ impl MailCraftApp {
                     self.dirty = true;
                 }
                 Event::OpenPage { url } => ctx.open_url(egui::OpenUrl::new_tab(url)),
+                Event::Classifying { done, total } => self.mail.classifying = Some((done, total)),
+                Event::ClassifyDone { count } => {
+                    self.mail.classifying = None;
+                    self.mail.status = Status::ClassifyDone(count);
+                    self.dirty = true;
+                }
+                Event::DigestReady { text } => {
+                    self.view.dialog = Some(shell::Dialog::Digest { text })
+                }
                 Event::SendFailed { composer, error } => {
                     if let Some(k) = self.view.composers.iter_mut().find(|k| k.id == composer) {
                         k.sending = false;
@@ -374,6 +383,7 @@ impl MailCraftApp {
                 }
                 Event::Error(e) => {
                     self.mail.signing_in = false;
+                    self.mail.classifying = None;
                     self.mail.status = Status::Error(e);
                 }
             }
@@ -512,7 +522,11 @@ impl MailCraftApp {
             | Command::Analyze { .. }
             | Command::Cleanup { .. }
             | Command::AllowSenders { .. }
-            | Command::SaveAllowList { .. }) => self.run_view(cmd),
+            | Command::SaveAllowList { .. }
+            | Command::SaveClaudeKey { .. }
+            | Command::DeleteClaudeKey
+            | Command::Classify { .. }
+            | Command::Digest) => self.run_view(cmd),
             Command::SearchServer => {
                 if let Some((account_id, _)) = self.mail.folder.clone() {
                     self.mail.status = Status::SearchingServer;
@@ -1154,6 +1168,29 @@ impl MailCraftApp {
     /// Commands of the Options, clean-up and screener views.
     fn run_view(&mut self, command: Command) {
         match command {
+            Command::SaveClaudeKey { key } => {
+                match mailcraft_store::vault::set_secret(mailcraft_sync::CLAUDE_KEY, key.trim()) {
+                    Ok(()) => self.view.claude_key_saved = Some(true),
+                    Err(e) => self.mail.status = Status::Error(e.to_string()),
+                }
+            }
+            Command::DeleteClaudeKey => {
+                match mailcraft_store::vault::delete_secret(mailcraft_sync::CLAUDE_KEY) {
+                    Ok(()) => self.view.claude_key_saved = Some(false),
+                    Err(e) => self.mail.status = Status::Error(e.to_string()),
+                }
+            }
+            Command::Classify { force } => {
+                if let Some(account_id) = self.current_account() {
+                    self.mail.classifying = Some((0, 0));
+                    self.send(Request::ClassifySenders { account_id, force });
+                }
+            }
+            Command::Digest => {
+                if let Some(account_id) = self.current_account() {
+                    self.send(Request::Digest { account_id });
+                }
+            }
             Command::Screen { address, accept } => {
                 let Some(account_id) = self.current_account() else {
                     return;
@@ -1181,6 +1218,14 @@ impl MailCraftApp {
             Command::OpenOptions => {
                 self.view.options_open = true;
                 self.view.cleanup_open = false;
+                if self.integrations {
+                    self.view.claude_key_saved = Some(
+                        mailcraft_store::vault::secret(mailcraft_sync::CLAUDE_KEY)
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                    );
+                }
             }
             Command::CloseOptions => self.view.options_open = false,
             Command::RebuildLocalCopy => {

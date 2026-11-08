@@ -95,6 +95,15 @@ pub enum Request {
         account_id: i64,
         query: String,
     },
+    /// Claude classifies senders not classified yet (all with `force`); needs an API key.
+    ClassifySenders {
+        account_id: i64,
+        force: bool,
+    },
+    /// Claude summarises the newsletters of the last 24 hours.
+    Digest {
+        account_id: i64,
+    },
     /// Creates or updates the server draft of composer `composer`.
     SaveDraft {
         composer: u64,
@@ -213,6 +222,17 @@ pub enum Event {
     /// An unsubscribe that only has a web page: the UI opens it for the user to confirm.
     OpenPage {
         url: String,
+    },
+    Classifying {
+        done: usize,
+        total: usize,
+    },
+    ClassifyDone {
+        count: usize,
+    },
+    /// The newsletter digest, ready to show.
+    DigestReady {
+        text: String,
     },
     /// Changes could not be sent; they wait for the next sync.
     Offline {
@@ -550,6 +570,14 @@ impl Runner {
             Request::AnalyzeSenders { account_id, force } => {
                 self.analyze_senders(account_id, force, emit)
             }
+            Request::ClassifySenders { account_id, force } => {
+                self.classify_senders(account_id, force, emit)
+            }
+            Request::Digest { account_id } => {
+                let text = self.digest(account_id)?;
+                emit(Event::DigestReady { text });
+                Ok(())
+            }
             Request::Cleanup {
                 account_id,
                 addresses,
@@ -846,6 +874,149 @@ impl Runner {
         emit(Event::Changed);
         emit(Event::AnalysisDone);
         Ok(())
+    }
+
+    fn claude_key() -> Result<String, String> {
+        mailcraft_store::vault::secret(CLAUDE_KEY)
+            .map_err(|e| e.to_string())?
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(|| "no Claude API key (File › Options › Claude)".to_owned())
+    }
+
+    /// Asks Claude about senders, 20 per request; the answer is kept, never asked twice.
+    fn classify_senders(
+        &mut self,
+        account_id: i64,
+        force: bool,
+        emit: &dyn Fn(Event),
+    ) -> Result<(), String> {
+        let key = Self::claude_key()?;
+        let todo: Vec<mailcraft_store::SenderRow> = self
+            .store
+            .senders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|s| force || s.ai.is_none())
+            .collect();
+        let total = todo.len();
+        let mut count = 0;
+        for (i, batch) in todo.chunks(mailcraft_ai::BATCH).enumerate() {
+            emit(Event::Classifying {
+                done: i * mailcraft_ai::BATCH,
+                total,
+            });
+            let facts: Vec<mailcraft_ai::SenderFacts> =
+                batch.iter().map(|s| self.facts(account_id, s)).collect();
+            let verdicts = mailcraft_ai::Claude::new(&self.http, &key)
+                .classify(&facts)
+                .map_err(|e| e.to_string())?;
+            for v in verdicts {
+                // Only answers about senders that were asked about.
+                if !batch
+                    .iter()
+                    .any(|s| s.address.eq_ignore_ascii_case(&v.adresse))
+                {
+                    continue;
+                }
+                let verdict = mailcraft_store::AiVerdict {
+                    category: v.categorie,
+                    confidence: v.confiance,
+                    reason: v.raison,
+                    action: v.action_suggeree,
+                };
+                self.store
+                    .put_ai_verdict(account_id, &v.adresse, &verdict)
+                    .map_err(|e| e.to_string())?;
+                count += 1;
+            }
+            emit(Event::Changed);
+        }
+        emit(Event::ClassifyDone { count });
+        Ok(())
+    }
+
+    /// What Claude is told about a sender: nothing more than needed to judge it.
+    fn facts(&self, account_id: i64, s: &mailcraft_store::SenderRow) -> mailcraft_ai::SenderFacts {
+        let check = |v: i64| match v {
+            1 => "pass",
+            2 => "fail",
+            _ => "inconnu",
+        };
+        let a = s.analysis.clone().unwrap_or_default();
+        let samples = self
+            .store
+            .sender_samples(account_id, &s.address, 3)
+            .unwrap_or_default();
+        mailcraft_ai::SenderFacts {
+            adresse: s.address.clone(),
+            nom: mailcraft_ai::short(&s.name, 80),
+            domaine: mailcraft_analysis::domain_of(&s.address),
+            spf: check(a.spf).into(),
+            dkim: check(a.dkim).into(),
+            dmarc: check(a.dmarc).into(),
+            alertes: a
+                .warnings
+                .split(',')
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            desabonnement_possible: a.one_click.is_some() || a.mailto.is_some() || a.web.is_some(),
+            nombre_de_mails: s.count,
+            objets: samples
+                .iter()
+                .map(|(sub, _)| mailcraft_ai::short(sub, 150))
+                .collect(),
+            extraits: samples
+                .iter()
+                .map(|(_, pre)| mailcraft_ai::short(pre, 150))
+                .collect(),
+        }
+    }
+
+    /// Summary of the last 24 hours of newsletters (by the local analysis or Claude).
+    fn digest(&mut self, account_id: i64) -> Result<String, String> {
+        let key = Self::claude_key()?;
+        let newsletters: std::collections::HashSet<String> = self
+            .store
+            .senders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|s| {
+                let ai = s.ai.as_ref().map(|v| v.category.as_str());
+                matches!(ai, Some("newsletter" | "promo"))
+                    || (ai.is_none()
+                        && s.analysis
+                            .as_ref()
+                            .is_some_and(|a| a.category == "newsletter"))
+            })
+            .map(|s| s.address.to_lowercase())
+            .collect();
+        let items: Vec<(String, String, String)> = self
+            .store
+            .received_since(account_id, unix_now() - 24 * 3600)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|m| newsletters.contains(&m.from_addr.to_lowercase()))
+            .take(40)
+            .map(|m| {
+                let from = if m.from_name.is_empty() {
+                    m.from_addr
+                } else {
+                    m.from_name
+                };
+                (
+                    mailcraft_ai::short(&from, 60),
+                    mailcraft_ai::short(&m.subject, 150),
+                    mailcraft_ai::short(&m.preview, 200),
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            return Ok(String::new());
+        }
+        mailcraft_ai::Claude::new(&self.http, &key)
+            .digest(&items)
+            .map_err(|e| e.to_string())
     }
 
     /// Folder id of a well-known folder (`deleteditems`, `archive`, `junkemail`).
@@ -1559,3 +1730,6 @@ mod cleanup_tests {
         assert!(unsubscribe_refusal(&row).unwrap().starts_with("suspect"));
     }
 }
+
+/// Name of the Claude API key in the OS vault.
+pub const CLAUDE_KEY: &str = "claude-api-key";

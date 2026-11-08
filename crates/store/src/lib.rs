@@ -458,6 +458,34 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// (subject, preview) of a sender's latest `n` messages, for Claude.
+    pub fn sender_samples(
+        &self,
+        account_id: i64,
+        address: &str,
+        n: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT subject, preview FROM messages WHERE account_id = ?1 AND from_addr = ?2 COLLATE NOCASE
+             ORDER BY received DESC LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![account_id, address, n as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every message of the account received since `since` (unix seconds), newest first.
+    pub fn received_since(&self, account_id: i64, since: i64) -> Result<Vec<MessageSummary>> {
+        let mut st = self.conn.prepare(
+            "SELECT account_id, id, folder_id, from_name, from_addr, subject, preview, received,
+                    is_read, has_attachments, flagged
+             FROM messages WHERE account_id = ?1 AND received >= ?2 ORDER BY received DESC",
+        )?;
+        let rows = st.query_map(params![account_id, since], summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Latest message of a sender (to read its headers).
     pub fn latest_from(&self, account_id: i64, address: &str) -> Result<Option<String>> {
         Ok(self

@@ -47,6 +47,9 @@ pub struct View {
     pub cleanup_open: bool,
     /// File › Options replaces the message list and reading pane.
     pub options_open: bool,
+    /// Claude key being typed in Options, and whether one is saved (`None`: not checked yet).
+    pub claude_key: String,
+    pub claude_key_saved: Option<bool>,
     pub cleanup: crate::cleanup::State,
 }
 
@@ -88,6 +91,10 @@ pub enum Dialog {
     /// First-launch assistant, at step 0..WELCOME_STEPS.
     Welcome {
         step: u8,
+    },
+    /// Claude's newsletter digest.
+    Digest {
+        text: String,
     },
     /// A real (not simulated) clean-up action, confirmed first.
     ConfirmCleanup {
@@ -170,6 +177,16 @@ pub enum Command {
         text: String,
     },
     /// Screener decision on a new sender.
+    SaveClaudeKey {
+        key: String,
+    },
+    DeleteClaudeKey,
+    /// Claude classifies senders (all of them again with `force`).
+    Classify {
+        force: bool,
+    },
+    /// Claude summarises the last 24 hours of newsletters.
+    Digest,
     Screen {
         address: String,
         accept: bool,
@@ -269,7 +286,7 @@ pub fn show(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Opt
         CentralPanel::default()
             .frame(pane_frame(ui))
             .show(ui, |ui| {
-                if let Some(cmd) = crate::options::show(ui, c, prefs, &mut view.dialog) {
+                if let Some(cmd) = crate::options::show(ui, c, prefs, view) {
                     pane_command = Some(cmd);
                 }
             });
@@ -605,6 +622,23 @@ fn dialog(
                         close = true;
                     }
                 });
+            }
+            Dialog::Digest { text } => {
+                ui.heading(T::DigestTitle.get(lang));
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        let shown = if text.trim().is_empty() {
+                            T::DigestEmpty.get(lang)
+                        } else {
+                            text.as_str()
+                        };
+                        ui.add(egui::Label::new(shown).selectable(true).wrap());
+                    });
+                ui.add_space(8.0);
+                if ui.button(T::Ok.get(lang)).clicked() {
+                    close = true;
+                }
             }
             Dialog::Signature { email, text } => {
                 ui.heading(T::Signature.get(lang));

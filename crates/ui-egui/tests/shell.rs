@@ -367,6 +367,9 @@ fn welcome_assistant_steps_and_options_view() {
     h.get_by_label("Options").click();
     h.run();
     h.get_by_label("Lancer MailCraft à l'ouverture de session Windows")
+        .scroll_to_me();
+    h.run();
+    h.get_by_label("Lancer MailCraft à l'ouverture de session Windows")
         .click();
     h.run();
     let prefs = h.state().as_ref().unwrap().prefs().clone();

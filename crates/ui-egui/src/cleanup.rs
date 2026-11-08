@@ -118,11 +118,27 @@ pub fn show(
         if ui.button(T::Reanalyze.get(lang)).clicked() {
             command = Some(Command::Analyze { force: true });
         }
+        if ui
+            .button(T::ClassifyWithClaude.get(lang))
+            .on_hover_text(T::ClaudeHelp.get(lang))
+            .clicked()
+        {
+            command = Some(Command::Classify { force: false });
+        }
+        if ui.button(T::DigestButton.get(lang)).clicked() {
+            command = Some(Command::Digest);
+        }
         ui.toggle_value(&mut state.show_log, T::ActionsLog.get(lang));
         if ui.button(T::BackToMail.get(lang)).clicked() {
             command = Some(Command::CloseCleanup);
         }
     });
+    if let Some((done, total)) = mail.classifying {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!("{} {done}/{total}", T::Classifying.get(lang)));
+        });
+    }
     if let Some((done, total)) = mail.analyzing {
         ui.horizontal(|ui| {
             ui.spinner();
