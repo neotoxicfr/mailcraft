@@ -295,36 +295,74 @@ pub enum Event {
 
 pub struct Worker {
     tx: Sender<Request>,
+    /// The reader: a second worker with its own connections, for what the user opens.
+    reads: Sender<Request>,
     rx: Receiver<Event>,
     cancel: Arc<AtomicBool>,
 }
 
 impl Worker {
-    /// Starts the thread. `wake` is called after each event so the UI repaints.
+    /// Starts the threads: the worker (sync, changes, sending) and the reader (message bodies,
+    /// images, attachments, export), each with its own store connection and server sessions,
+    /// so opening a message never waits behind a sync. `wake` is called after each event so the
+    /// UI repaints.
     pub fn start(config: Config, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, requests) = mpsc::channel();
-        let again = tx.clone();
+        let (reads, read_requests) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let flag = cancel.clone();
-        std::thread::Builder::new()
-            .name("mailcraft-sync".into())
-            .spawn(move || {
-                let side = (events.clone(), wake.clone());
-                let emit = |e: Event| {
-                    let _ = events.send(e);
-                    wake();
-                };
-                match Runner::new(config, flag, side, again) {
-                    Ok(mut runner) => runner.run(requests, &emit),
-                    Err(e) => emit(Event::Error(e)),
-                }
-            })
-            .ok();
-        Self { tx, rx, cancel }
+        let spawn =
+            |name: &str, requests: Receiver<Request>, cancel: Arc<AtomicBool>, reader: bool| {
+                let (config, events, wake, again) =
+                    (config.clone(), events.clone(), wake.clone(), tx.clone());
+                std::thread::Builder::new()
+                    .name(name.into())
+                    .spawn(move || {
+                        let side = (events.clone(), wake.clone());
+                        let emit = |e: Event| {
+                            let _ = events.send(e);
+                            wake();
+                        };
+                        match Runner::new(config, cancel, side, again) {
+                            Ok(mut runner) if reader => runner.serve(&requests, &emit),
+                            Ok(mut runner) => runner.run(requests, &emit),
+                            Err(e) => emit(Event::Error(e)),
+                        }
+                    })
+                    .ok();
+            };
+        spawn("mailcraft-sync", requests, cancel.clone(), false);
+        spawn(
+            "mailcraft-read",
+            read_requests,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        );
+        Self {
+            tx,
+            reads,
+            rx,
+            cancel,
+        }
+    }
+
+    /// What the reader handles: reading only, nothing that changes the mailbox.
+    fn is_read(request: &Request) -> bool {
+        matches!(
+            request,
+            Request::FetchBody { .. }
+                | Request::FetchInline { .. }
+                | Request::FetchImage { .. }
+                | Request::SaveAttachment { .. }
+                | Request::Export { .. }
+        )
     }
 
     pub fn send(&self, request: Request) {
+        if Self::is_read(&request) {
+            let _ = self.reads.send(request);
+            return;
+        }
         if matches!(
             request,
             Request::AddMicrosoftAccount | Request::AddGoogleAccount
@@ -458,23 +496,27 @@ impl Runner {
         }
     }
 
-    /// What the user is waiting for: opening a message, its images and attachments, read and
-    /// flag marks, moves, sending. Served even in the middle of a sync.
+    /// The reader's loop: one request after the other, no timers, no sync.
+    fn serve(&mut self, requests: &Receiver<Request>, emit: &dyn Fn(Event)) {
+        for request in requests {
+            if let Err(e) = self.handle(request, emit) {
+                emit(Event::Error(e));
+            }
+        }
+    }
+
+    /// Changes the user is waiting for: read and flag marks, moves, sending. Served even in the
+    /// middle of a sync (reading goes to the reader thread).
     fn urgent(request: &Request) -> bool {
         matches!(
             request,
-            Request::FetchBody { .. }
-                | Request::FetchInline { .. }
-                | Request::FetchImage { .. }
-                | Request::SaveAttachment { .. }
-                | Request::SetRead { .. }
+            Request::SetRead { .. }
                 | Request::SetFlag { .. }
                 | Request::Move { .. }
                 | Request::Delete { .. }
                 | Request::SaveDraft { .. }
                 | Request::Send { .. }
                 | Request::DiscardDraft { .. }
-                | Request::Export { .. }
         )
     }
 
