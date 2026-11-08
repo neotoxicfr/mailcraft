@@ -7,12 +7,11 @@ use resvg::{tiny_skia, usvg};
 /// Sizes embedded for the program itself (window, notification area).
 const RUNTIME: [u32; 2] = [32, 64];
 
-fn render(svg: &str, size: u32) -> Vec<u8> {
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).expect("icon SVG");
+fn render(tree: &usvg::Tree, size: u32) -> Vec<u8> {
     let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("icon size");
     let scale = size as f32 / tree.size().width();
     resvg::render(
-        &tree,
+        tree,
         tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
@@ -34,6 +33,7 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={source}");
     let svg = std::fs::read_to_string(source).expect("assets/app-icon/mailcraft.svg");
+    let svg = usvg::Tree::from_str(&svg, &usvg::Options::default()).expect("icon SVG");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     for size in RUNTIME {
         std::fs::write(out.join(format!("icon-{size}.rgba")), render(&svg, size))

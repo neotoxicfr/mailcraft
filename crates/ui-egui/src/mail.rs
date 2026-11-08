@@ -68,14 +68,14 @@ pub struct Mail {
     /// The message's HTML with its pixels removed as the blocking says (built once per
     /// message): the original view only re-embeds inline images into it.
     prepared_html: String,
-    body_key: Option<(i64, String)>,
+    /// The message (and image blocking) the parsed body is for.
+    body_key: Option<((i64, String), (bool, bool))>,
     /// The user's order: account addresses, and folder ids per account id.
     pub account_order: Vec<String>,
     /// Folder ids in the user's order, per account address (lowercase).
     pub folder_order: std::collections::BTreeMap<String, Vec<String>>,
     /// Image blocking applied to the shown message: (remote images, tracking pixels).
     pub blocking: (bool, bool),
-    blocking_applied: (bool, bool),
     /// Remote images: asked for, loaded (bytes given to egui), or failed.
     pub images_requested: HashSet<String>,
     pub images_ready: HashSet<String>,
@@ -202,10 +202,13 @@ impl Mail {
             None => None,
         };
         // Parse once per message (or when its body arrives), not every frame.
-        let key = self.message.clone().filter(|_| self.body.is_some());
-        if key != self.body_key || self.blocking != self.blocking_applied {
+        let key = self
+            .message
+            .clone()
+            .filter(|_| self.body.is_some())
+            .map(|m| (m, self.blocking));
+        if key != self.body_key {
             self.body_key = key;
-            self.blocking_applied = self.blocking;
             self.inline.clear();
             self.inline_requested = false;
             match (&self.message, &self.body) {
@@ -251,7 +254,7 @@ impl Mail {
             return None;
         }
         self.inline_requested = true;
-        self.body_key.clone()
+        self.body_key.as_ref().map(|(m, _)| m.clone())
     }
 
     pub fn is_selected(&self, account_id: i64, id: &str) -> bool {
