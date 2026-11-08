@@ -489,3 +489,16 @@ fn screener_lists_new_undecided_senders_only() {
     s.set_screened(1, "other@example.com", false).unwrap();
     assert!(ids(&s).is_empty());
 }
+
+#[test]
+fn marks_and_auto_replies_are_kept_per_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(&dir.path().join("mail.db"), key(), true).unwrap();
+    assert_eq!(s.mark(1, "automation").unwrap(), None);
+    s.set_mark(1, "automation", 5).unwrap();
+    s.set_mark(1, "automation", 9).unwrap();
+    assert_eq!(s.mark(1, "automation").unwrap(), Some(9));
+    assert_eq!(s.mark(2, "automation").unwrap(), None);
+    s.set_auto_replied(1, "Alex@Example.org", 42).unwrap();
+    assert_eq!(s.auto_replied(1, "alex@example.org").unwrap(), Some(42));
+}

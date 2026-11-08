@@ -397,6 +397,67 @@ impl Store {
                 COMMIT;",
             )?;
         }
+        if version < 9 {
+            // marks: small per-account values (how far automation went).
+            // auto_replied: when each sender last got the out-of-office reply.
+            self.conn.execute_batch(
+                "BEGIN;
+                CREATE TABLE marks (
+                    account_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, key)
+                );
+                CREATE TABLE auto_replied (
+                    account_id INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    at INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, address)
+                );
+                PRAGMA user_version = 9;
+                COMMIT;",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn mark(&self, account_id: i64, key: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM marks WHERE account_id = ?1 AND key = ?2",
+                params![account_id, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_mark(&self, account_id: i64, key: &str, value: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO marks (account_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id, key) DO UPDATE SET value = excluded.value",
+            params![account_id, key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn auto_replied(&self, account_id: i64, address: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT at FROM auto_replied WHERE account_id = ?1 AND address = lower(?2)",
+                params![account_id, address],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_auto_replied(&self, account_id: i64, address: &str, at: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO auto_replied (account_id, address, at) VALUES (?1, lower(?2), ?3)
+             ON CONFLICT(account_id, address) DO UPDATE SET at = excluded.at",
+            params![account_id, address, at],
+        )?;
         Ok(())
     }
 

@@ -35,6 +35,45 @@ impl Graph<'_> {
             .collect())
     }
 
+    /// Out-of-office reply on the server: on (until the end of `until`, unix seconds, when
+    /// given) or off. The same text goes to everyone.
+    pub fn set_auto_reply(&self, on: bool, message: &str, until: Option<i64>) -> Result<()> {
+        let html = format!(
+            "<p>{}</p>",
+            message
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>")
+        );
+        let utc = |t: i64| {
+            chrono::DateTime::from_timestamp(t, 0)
+                .unwrap_or_default()
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        };
+        let mut setting = serde_json::json!({
+            "status": if !on { "disabled" } else if until.is_some() { "scheduled" } else { "alwaysEnabled" },
+            "externalAudience": "all",
+            "internalReplyMessage": html,
+            "externalReplyMessage": html,
+        });
+        if on && let Some(until) = until {
+            let now = chrono::Utc::now().timestamp();
+            setting["scheduledStartDateTime"] =
+                serde_json::json!({ "dateTime": utc(now), "timeZone": "UTC" });
+            setting["scheduledEndDateTime"] =
+                serde_json::json!({ "dateTime": utc(until), "timeZone": "UTC" });
+        }
+        let body = serde_json::json!({ "automaticRepliesSetting": setting });
+        self.send(|| {
+            self.http
+                .patch(format!("{GRAPH}/me/mailboxSettings"))
+                .json(&body)
+        })?;
+        Ok(())
+    }
+
     /// (message id, folder id) of every message from `address`, in every folder.
     pub fn messages_from(&self, address: &str) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();

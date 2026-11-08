@@ -94,6 +94,13 @@ pub enum Dialog {
     Welcome {
         step: u8,
     },
+    Rules {
+        draft: Box<crate::automation_ui::RuleDraft>,
+    },
+    Away {
+        away: Box<mailcraft_sync::Away>,
+        until: String,
+    },
     /// Microsoft sign-in, or an IMAP + SMTP account.
     AddAccount {
         form: Box<crate::account_form::Form>,
@@ -131,6 +138,10 @@ pub enum Pick {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     Exit,
+    /// Out-of-office reply saved: keep it and set it on the servers.
+    SaveAway {
+        away: Box<mailcraft_sync::Away>,
+    },
     /// Opens the "add an account" dialog.
     AddAccount,
     AddMicrosoftAccount,
@@ -641,6 +652,23 @@ fn dialog(
                     }
                 });
             }
+            Dialog::Rules { draft } => {
+                let mut d = (**draft).clone();
+                close = crate::automation_ui::rules(ui, c, prefs, &mut d);
+                if let Some(Dialog::Rules { draft }) = state.as_mut() {
+                    **draft = d;
+                }
+            }
+            Dialog::Away { away, until } => {
+                let (mut a, mut u) = ((**away).clone(), until.clone());
+                let (command, done) = crate::automation_ui::away(ui, lang, &mut a, &mut u);
+                if let Some(Dialog::Away { away, until }) = state.as_mut() {
+                    **away = a;
+                    *until = u;
+                }
+                result = command;
+                close = done;
+            }
             Dialog::AddAccount { form } => {
                 let mut form = form.clone();
                 let (command, done) = crate::account_form::show(ui, lang, &mut form);
@@ -811,6 +839,22 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                     view.dialog = Some(Dialog::Signature {
                         email: account.email.clone(),
                         text,
+                    });
+                }
+                let has_account = !c.mail.accounts.is_empty();
+                if big_button(ui, c, Icon::Folder, T::Rules, has_account, "").clicked() {
+                    view.dialog = Some(Dialog::Rules {
+                        draft: Box::default(),
+                    });
+                }
+                if big_button(ui, c, Icon::Reply, T::AwayButton, has_account, "").clicked() {
+                    view.dialog = Some(Dialog::Away {
+                        until: prefs
+                            .away
+                            .until
+                            .map(crate::automation_ui::format_day)
+                            .unwrap_or_default(),
+                        away: Box::new(prefs.away.clone()),
                     });
                 }
                 if big_button(ui, c, Icon::Gear, T::Options, true, "").clicked() {

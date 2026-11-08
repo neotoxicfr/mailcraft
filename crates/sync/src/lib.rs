@@ -2,7 +2,10 @@
 //! its own database connection. The UI sends [`Request`]s and reads [`Event`]s, then re-reads
 //! the store.
 
+mod automation;
 mod imap_side;
+
+pub use automation::{Away, Rule, RuleAction};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -38,6 +41,15 @@ pub enum Request {
     /// The server said the inbox of this IMAP account changed (IDLE): sync it now.
     SyncInbox {
         account_id: i64,
+    },
+    /// The user's rules and out-of-office reply, as set in the app (no server change).
+    SetAutomation {
+        rules: Vec<Rule>,
+        away: Away,
+    },
+    /// The out-of-office reply was changed: set it on Microsoft servers too.
+    SetAway {
+        away: Away,
     },
     /// Checks the IMAP and SMTP sign-in, then adds the account and syncs it.
     AddImapAccount {
@@ -333,6 +345,8 @@ struct Runner {
     again: Sender<Request>,
     /// IMAP accounts whose inbox is watched with IDLE.
     watched: HashSet<i64>,
+    rules: Vec<Rule>,
+    away: Option<Away>,
 }
 
 impl Runner {
@@ -362,6 +376,8 @@ impl Runner {
             raw: None,
             again,
             watched: HashSet::new(),
+            rules: Vec::new(),
+            away: None,
         })
     }
 
@@ -389,8 +405,15 @@ impl Runner {
         };
         match request {
             Request::AddImapAccount { .. } => Ok(()),
+            Request::SetAutomation { rules, away } => {
+                self.rules = rules;
+                self.away = Some(away);
+                Ok(())
+            }
+            Request::SetAway { away } => self.set_away(Some(away)),
             Request::SyncInbox { account_id } => {
                 self.imap_sync_inbox(account_id, emit)?;
+                self.run_automation(account_id, emit)?;
                 emit(Event::SyncDone);
                 Ok(())
             }
@@ -399,6 +422,7 @@ impl Runner {
                 self.flush_pending(emit)?;
                 for account in self.store.accounts().map_err(|e| e.to_string())? {
                     self.sync_account(account.id, emit)?;
+                    self.run_automation(account.id, emit)?;
                 }
                 emit(Event::SyncDone);
                 Ok(())

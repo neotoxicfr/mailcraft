@@ -532,3 +532,33 @@ fn all_inboxes_mix_accounts() {
     h.get_by_label("Club — Sortie samedi");
     h.get_by_label("Example Shop — Votre facture");
 }
+
+#[test]
+fn rules_dialog_adds_a_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Fichier").click();
+    h.run();
+    h.get_by_label("Règles").click();
+    h.run();
+    h.get_by_label("Aucune règle pour l'instant.");
+    h.get_by_label("De contient").focus();
+    h.run();
+    h.get_by_label("De contient").type_text("Shop");
+    h.run();
+    // Default action: move, which needs a folder first.
+    h.get_by_label("Ajouter").click();
+    h.run();
+    assert!(h.state().as_ref().unwrap().prefs().rules.is_empty());
+    h.get_by_label("Alors").click();
+    h.run();
+    h.get_by_label("Marquer comme lu").click();
+    h.run();
+    h.get_by_label("Ajouter").click();
+    h.run();
+    let rules = h.state().as_ref().unwrap().prefs().rules.clone();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].from_contains, "Shop");
+    assert_eq!(rules[0].action, mailcraft_sync::RuleAction::MarkRead);
+}

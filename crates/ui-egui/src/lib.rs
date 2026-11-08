@@ -2,6 +2,7 @@
 
 mod account_form;
 mod attachments;
+mod automation_ui;
 mod cleanup;
 mod composer;
 mod fonts;
@@ -235,6 +236,12 @@ impl MailCraftApp {
             shell::show(ui, &c, &mut self.view, &mut next)
         };
         if next != prefs {
+            if next.rules != prefs.rules || next.away != prefs.away {
+                self.send(Request::SetAutomation {
+                    rules: next.rules.clone(),
+                    away: next.away.clone(),
+                });
+            }
             self.settings.update(|p| *p = next);
         }
         self.apply_integrations();
@@ -404,6 +411,16 @@ impl MailCraftApp {
                 self.view.dialog = Some(shell::Dialog::AddAccount {
                     form: Box::default(),
                 });
+            }
+            Command::SaveAway { away } => {
+                let away = *away;
+                self.settings.update(|p| p.away = away.clone());
+                let rules = self.settings.get().rules.clone();
+                self.send(Request::SetAutomation {
+                    rules,
+                    away: away.clone(),
+                });
+                self.send(Request::SetAway { away });
             }
             Command::AddImapAccount { server } => {
                 self.mail.signing_in = true;
@@ -1157,6 +1174,10 @@ fn open_backend(ctx: &Context, prefs: &Prefs) -> Result<Backend, String> {
         },
         std::sync::Arc::new(move || repaint.request_repaint()),
     );
+    worker.send(Request::SetAutomation {
+        rules: prefs.rules.clone(),
+        away: prefs.away.clone(),
+    });
     Ok(Backend {
         store,
         worker: Some(worker),
