@@ -65,6 +65,9 @@ pub struct Mail {
     inline_requested: bool,
     /// The message's HTML prepared for the original view (inline images embedded, CSP added).
     pub original_html: String,
+    /// The message's HTML with its pixels removed as the blocking says (built once per
+    /// message): the original view only re-embeds inline images into it.
+    prepared_html: String,
     body_key: Option<(i64, String)>,
     /// The user's order: account addresses, and folder ids per account id.
     pub account_order: Vec<String>,
@@ -207,18 +210,27 @@ impl Mail {
             self.inline_requested = false;
             match (&self.message, &self.body) {
                 (Some((a, id)), Some(b)) => {
-                    self.blocks = if b.html.is_empty() {
-                        mailcraft_html::from_text(&b.text)
+                    let (remote, trackers) = self.blocking;
+                    (self.blocks, self.prepared_html) = if b.html.is_empty() {
+                        (mailcraft_html::from_text(&b.text), String::new())
                     } else {
-                        mailcraft_html::parse_with(&b.html, self.blocking.1)
+                        // One parse: the blocks, and the pixels to drop from the original.
+                        let (blocks, pixels) = mailcraft_html::parse_full(&b.html, trackers);
+                        let prepared = if trackers && !remote {
+                            mailcraft_html::without_tracker_urls(&b.html, &pixels)
+                        } else {
+                            b.html.clone()
+                        };
+                        (blocks, prepared)
                     };
                     self.attachments = store.attachments(*a, id)?;
-                    self.original_html = original_html(&b.html, &self.inline, self.blocking);
+                    self.original_html = page(&self.prepared_html, &self.inline, remote);
                 }
                 _ => {
                     self.blocks.clear();
                     self.attachments.clear();
                     self.original_html.clear();
+                    self.prepared_html.clear();
                 }
             }
         }
@@ -228,8 +240,8 @@ impl Mail {
     /// Inline images arrived for the message shown.
     pub fn set_inline(&mut self, images: Vec<(String, Vec<u8>)>) {
         self.inline = images.into_iter().collect();
-        if let Some(b) = &self.body {
-            self.original_html = original_html(&b.html, &self.inline, self.blocking);
+        if self.body.is_some() {
+            self.original_html = page(&self.prepared_html, &self.inline, self.blocking.0);
         }
     }
 
@@ -366,15 +378,24 @@ pub fn original_html(
     inline: &HashMap<String, Vec<u8>>,
     (remote, trackers): (bool, bool),
 ) -> String {
+    page(
+        &mailcraft_html::prepare(html, remote, trackers),
+        inline,
+        remote,
+    )
+}
+
+/// The original-view page from HTML already rid of its pixels: the page's security policy,
+/// then the HTML with inline (`cid:`) images embedded.
+fn page(html: &str, inline: &HashMap<String, Vec<u8>>, remote: bool) -> String {
     if html.is_empty() {
         return String::new();
     }
-    let html = mailcraft_html::prepare(html, remote, trackers);
     let mut out = String::with_capacity(html.len() + 512);
     out.push_str("<meta http-equiv=\"Content-Security-Policy\" content=\"");
     out.push_str(&mailcraft_html::page_policy(remote, None));
     out.push_str("\">");
-    let mut rest: &str = &html;
+    let mut rest: &str = html;
     while let Some(at) = rest.find("cid:") {
         out.push_str(&rest[..at]);
         let after = &rest[at + 4..];

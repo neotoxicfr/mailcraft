@@ -1,4 +1,6 @@
-use super::{Block, Kind, from_text, parse, parse_with, to_text, tracker_urls, without_trackers};
+use super::{
+    Block, Kind, from_text, parse, parse_full, parse_with, to_text, tracker_urls, without_trackers,
+};
 
 fn texts(blocks: &[Block]) -> Vec<String> {
     blocks
@@ -178,4 +180,14 @@ fn pixel_removal_touches_only_the_src_value() {
     let clean = without_trackers(html);
     assert!(clean.contains("top.jpg") && clean.contains(r#"href="https://x.example/t""#));
     assert!(clean.contains(r#"<img src="" width="1">"#), "{clean}");
+}
+
+#[test]
+fn one_parse_finds_the_same_pixels() {
+    let html = r#"<p>Hi</p><img src="https://a.example/p.gif" width="1">
+<div style="display:none"><img src="https://b.example/open.php?u=1"></div>
+<img src="https://c.example/photo.jpg">"#;
+    let (_, pixels) = parse_full(html, true);
+    assert_eq!(pixels, tracker_urls(html));
+    assert_eq!(pixels.len(), 2, "{pixels:?}");
 }

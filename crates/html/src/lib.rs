@@ -61,6 +61,8 @@ struct Style {
 
 struct Walker {
     drop_trackers: bool,
+    /// Addresses of the tracking pixels met (hidden parts included), for the original view.
+    trackers: Vec<String>,
     blocks: Vec<Block>,
     current: Vec<Inline>,
     kind: Kind,
@@ -77,9 +79,16 @@ pub fn parse(html: &str) -> Vec<Block> {
 /// Like [`parse`]; `drop_trackers` false keeps tracking pixels (they are then fetched, so the
 /// sender knows the mail was opened).
 pub fn parse_with(html: &str, drop_trackers: bool) -> Vec<Block> {
+    parse_full(html, drop_trackers).0
+}
+
+/// [`parse_with`], and the addresses of the message's tracking pixels found on the way: the
+/// original view can drop them without parsing the message again.
+pub fn parse_full(html: &str, drop_trackers: bool) -> (Vec<Block>, Vec<String>) {
     let doc = Html::parse_document(html);
     let mut w = Walker {
         drop_trackers,
+        trackers: Vec::new(),
         blocks: Vec::new(),
         current: Vec::new(),
         kind: Kind::Para,
@@ -90,7 +99,9 @@ pub fn parse_with(html: &str, drop_trackers: bool) -> Vec<Block> {
     w.children(doc.root_element(), Style::default(), None);
     w.flush();
     w.blocks.truncate(MAX_BLOCKS);
-    w.blocks
+    w.trackers.sort();
+    w.trackers.dedup();
+    (w.blocks, w.trackers)
 }
 
 /// Plain-text mail: one paragraph per line, blank lines kept as breaks.
@@ -243,10 +254,7 @@ pub fn tracker_urls(html: &str) -> Vec<String> {
         .select(&img)
         .filter(is_tracker)
         .filter_map(|el| el.value().attr("src").map(str::to_owned))
-        .filter(|s| {
-            let l = s.to_ascii_lowercase();
-            l.starts_with("http://") || l.starts_with("https://") || l.starts_with("//")
-        })
+        .filter(|s| web_address(s))
         .collect();
     out.sort();
     out.dedup();
@@ -256,8 +264,18 @@ pub fn tracker_urls(html: &str) -> Vec<String> {
 /// The HTML with its tracking pixels pointing nowhere (`src=""`), for the original view and
 /// printing. Both spellings of `&` in the address are handled.
 pub fn without_trackers(html: &str) -> String {
+    without_tracker_urls(html, &tracker_urls(html))
+}
+
+fn web_address(src: &str) -> bool {
+    let l = src.to_ascii_lowercase();
+    l.starts_with("http://") || l.starts_with("https://") || l.starts_with("//")
+}
+
+/// [`without_trackers`] with addresses already known (from [`parse_full`]): no parsing.
+pub fn without_tracker_urls(html: &str, urls: &[String]) -> String {
     let mut out = html.to_owned();
-    for url in tracker_urls(html) {
+    for url in urls {
         let escaped = url.replace('&', "&amp;");
         // Only the whole `src` value: the same address elsewhere (a link, a longer image
         // address starting with it) stays as it is.
@@ -306,6 +324,15 @@ fn tracking_pixel(el: &ElementRef<'_>) -> bool {
 }
 
 impl Walker {
+    fn note_tracker(&mut self, el: &ElementRef<'_>) {
+        if let Some(src) = el.value().attr("src")
+            && is_tracker(el)
+            && web_address(src)
+        {
+            self.trackers.push(src.to_owned());
+        }
+    }
+
     fn flush(&mut self) {
         if self.blocks.len() >= MAX_BLOCKS {
             self.current.clear();
@@ -433,6 +460,12 @@ impl Walker {
                 | "link"
         ) || hidden(&el)
         {
+            // Not shown, but the original view would still load its pixels.
+            for d in el.descendants().filter_map(ElementRef::wrap) {
+                if d.value().name() == "img" {
+                    self.note_tracker(&d);
+                }
+            }
             return;
         }
         if name != "img"
@@ -459,6 +492,7 @@ impl Walker {
             }
             "hr" => self.push_block(Kind::Rule),
             "img" => {
+                self.note_tracker(&el);
                 let src = el.value().attr("src").unwrap_or("").trim();
                 let lower = src.to_ascii_lowercase();
                 if (lower.starts_with("https://")
