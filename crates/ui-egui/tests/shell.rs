@@ -471,3 +471,64 @@ fn screener_lists_new_senders_until_accepted() {
         "same sender: accepted once for all its mail"
     );
 }
+
+#[test]
+fn all_inboxes_mix_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_owned();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            move |ui, app: &mut Option<MailCraftApp>| {
+                let app = app.get_or_insert_with(|| {
+                    let mut app = MailCraftApp::with_location(ui.ctx(), Location::Memory);
+                    app.update_prefs(|p| p.general.language = LangPref::Fr);
+                    let mut s = sample_store(&path);
+                    s.upsert_account("imap", "other@example.org", "Other", "{}")
+                        .unwrap();
+                    s.replace_folders(
+                        2,
+                        &[mailcraft_store::Folder {
+                            account_id: 2,
+                            id: "INBOX".into(),
+                            parent_id: None,
+                            name: "Inbox".into(),
+                            role: Some("inbox".into()),
+                            unread: 1,
+                            total: 1,
+                        }],
+                    )
+                    .unwrap();
+                    s.apply_changes(
+                        2,
+                        "INBOX",
+                        &[mailcraft_store::MessageSummary {
+                            account_id: 2,
+                            id: "1:7:INBOX".into(),
+                            folder_id: "INBOX".into(),
+                            from_name: "Club".into(),
+                            from_addr: "club@example.org".into(),
+                            subject: "Sortie samedi".into(),
+                            preview: String::new(),
+                            received: 1_794_130_300,
+                            is_read: false,
+                            has_attachments: false,
+                            flagged: false,
+                        }],
+                        &[],
+                    )
+                    .unwrap();
+                    app.attach_store(s);
+                    app
+                });
+                app.ui(ui);
+            },
+            None,
+        );
+    h.run();
+    assert!(h.query_by_label("Club — Sortie samedi").is_none());
+    h.get_by_label("Toutes les boîtes de réception").click();
+    h.run();
+    h.get_by_label("Club — Sortie samedi");
+    h.get_by_label("Example Shop — Votre facture");
+}

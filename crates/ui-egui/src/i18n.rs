@@ -77,6 +77,7 @@ pub enum T {
     NoAccount,
     SearchHint,
     SearchFilters,
+    AllInboxes,
     EmptyList,
     ReadingEmpty,
     NoSubject,
@@ -355,6 +356,7 @@ impl T {
                 "No account.\nFile › Add Account",
             ),
             Self::SearchHint => ("Rechercher dans la boîte aux lettres", "Search the mailbox"),
+            Self::AllInboxes => ("Toutes les boîtes de réception", "All inboxes"),
             Self::SearchFilters => (
                 "Filtres : de:nom  objet:mot  pj (pièce jointe)  non-lu  suivi\nExemple : de:alex objet:\"note de frais\" pj",
                 "Filters: from:name  subject:word  has:attachment  is:unread  is:flagged\nExample: from:alex subject:\"expense report\" has:attachment",

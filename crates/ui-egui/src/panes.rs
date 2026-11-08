@@ -68,6 +68,22 @@ pub fn folder_pane(
     }
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         section_title(ui, T::Favorites.get(c.lang));
+        if mail.accounts.len() > 1 {
+            let inboxes = mail
+                .folders
+                .iter()
+                .filter(|f| f.role.as_deref() == Some("inbox"));
+            let all = mailcraft_store::Folder {
+                account_id: mail.accounts[0].id,
+                id: crate::mail::UNIFIED.into(),
+                parent_id: None,
+                name: T::AllInboxes.get(c.lang).into(),
+                role: None,
+                unread: inboxes.map(|f| f.unread).sum(),
+                total: 0,
+            };
+            folder_row(ui, c, &all, 1, &mut None, command);
+        }
         // Inbox, Sent, Deleted: in that order, for every account.
         for role in ["inbox", "sentitems", "deleteditems"] {
             for f in mail

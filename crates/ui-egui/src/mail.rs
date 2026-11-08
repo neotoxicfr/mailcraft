@@ -7,6 +7,8 @@ use mailcraft_store::{Account, Attachment, Folder, MessageBody, MessageSummary, 
 
 /// Id of the screener's virtual folder « À valider ».
 pub const SCREENER: &str = "__screener";
+/// Virtual folder: the inboxes of every account, newest first.
+pub const UNIFIED: &str = "__all_inboxes";
 
 /// Most recent messages listed per folder; older ones stay in the store.
 const LIST_LIMIT: usize = 5000;
@@ -125,6 +127,7 @@ impl Mail {
         }
         let valid = self.folder.as_ref().is_some_and(|(a, f)| {
             (f == SCREENER && screener.is_some())
+                || (f == UNIFIED && self.accounts.len() > 1)
                 || self
                     .folders
                     .iter()
@@ -142,6 +145,19 @@ impl Mail {
         self.searching = !search.trim().is_empty();
         self.messages = match &self.folder {
             Some((a, _)) if self.searching => store.search(*a, search, LIST_LIMIT)?,
+            Some((_, f)) if f == UNIFIED => {
+                let mut all = Vec::new();
+                for inbox in self
+                    .folders
+                    .iter()
+                    .filter(|f| f.role.as_deref() == Some("inbox"))
+                {
+                    all.extend(store.messages(inbox.account_id, &inbox.id, "", LIST_LIMIT)?);
+                }
+                all.sort_by_key(|m| std::cmp::Reverse(m.received));
+                all.truncate(LIST_LIMIT);
+                all
+            }
             Some((a, f)) if f == SCREENER => match (screener, self.folder_with_role(*a, "inbox")) {
                 (Some(since), Some(inbox)) => store.screening(*a, &inbox.id.clone(), since)?,
                 _ => Vec::new(),

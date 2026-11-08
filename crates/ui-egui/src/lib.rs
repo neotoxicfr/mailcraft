@@ -749,8 +749,13 @@ impl MailCraftApp {
     /// message below it, as Outlook does.
     fn take_selection(&mut self) -> Option<(i64, Vec<String>)> {
         let selected = self.mail.selected_messages();
+        // One account per action (the shared inbox can mix them): the first one's messages.
         let account_id = selected.first()?.account_id;
-        let ids: Vec<String> = selected.iter().map(|m| m.id.clone()).collect();
+        let ids: Vec<String> = selected
+            .iter()
+            .filter(|m| m.account_id == account_id)
+            .map(|m| m.id.clone())
+            .collect();
         let last = self.mail.messages.iter().rposition(|m| ids.contains(&m.id));
         let next = last.and_then(|i| {
             self.mail.messages[i + 1..]
@@ -765,7 +770,7 @@ impl MailCraftApp {
     }
 
     fn move_selection_to_role(&mut self, role: &str) {
-        let Some((account_id, _)) = self.mail.folder.clone() else {
+        let Some(account_id) = self.mail.selected_messages().first().map(|m| m.account_id) else {
             return;
         };
         if let Some(dest) = self
@@ -778,15 +783,16 @@ impl MailCraftApp {
     }
 
     fn move_selection(&mut self, dest: &str) {
-        if dest == mail::SCREENER {
+        if dest == mail::SCREENER || dest == mail::UNIFIED {
             return;
         }
+        let account = self.mail.selected_messages().first().map(|m| m.account_id);
         // Where each message comes from (search results mix folders); those already in `dest` stay.
         let from: Vec<(String, String)> = self
             .mail
             .selected_messages()
             .iter()
-            .filter(|m| m.folder_id != dest)
+            .filter(|m| m.folder_id != dest && Some(m.account_id) == account)
             .map(|m| (m.id.clone(), m.folder_id.clone()))
             .collect();
         if from.is_empty() {
