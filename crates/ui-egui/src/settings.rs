@@ -102,6 +102,8 @@ pub struct Prefs {
     pub accounts: Accounts,
     pub cleanup: Cleanup,
     pub startup: Startup,
+    /// Folder pane: account and folder order, folded sections.
+    pub folders: FolderLayout,
     /// What MailCraft does with new mail by itself.
     pub rules: Vec<mailcraft_sync::Rule>,
     /// Words added to the spell checker (names, jargon).
@@ -150,4 +152,68 @@ pub struct Startup {
     pub minimized: bool,
     /// The close button hides the window to the notification area (mail keeps syncing).
     pub close_to_tray: bool,
+}
+
+/// How the folder pane is arranged. Accounts are named by address (stable across a rebuild of
+/// the local copy), folders by their id within the account.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct FolderLayout {
+    /// Accounts in this order (addresses); the others after them.
+    pub accounts: Vec<String>,
+    /// Per account address: folder ids in the user's order (siblings compared only).
+    pub folders: std::collections::BTreeMap<String, Vec<String>>,
+    /// Folded entries: `fav`, `a:<address>`, `f:<address>:<folder id>`.
+    pub folded: std::collections::BTreeSet<String>,
+}
+
+impl FolderLayout {
+    pub fn toggle(&mut self, key: &str) {
+        if !self.folded.remove(key) {
+            self.folded.insert(key.to_owned());
+        }
+    }
+
+    /// Moves `item` one place up or down within `current` (the order as shown) and records the
+    /// result in `list`.
+    pub fn move_in(list: &mut Vec<String>, current: &[String], item: &str, up: bool) {
+        let Some(i) = current.iter().position(|x| x == item) else {
+            return;
+        };
+        let j = if up {
+            match i.checked_sub(1) {
+                Some(j) => j,
+                None => return,
+            }
+        } else if i + 1 < current.len() {
+            i + 1
+        } else {
+            return;
+        };
+        let mut order = current.to_vec();
+        order.swap(i, j);
+        list.retain(|x| !order.contains(x));
+        list.extend(order);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::FolderLayout;
+
+    #[test]
+    fn moving_keeps_other_entries() {
+        let shown: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        let mut list = vec!["x".to_owned()];
+        FolderLayout::move_in(&mut list, &shown, "c", true);
+        assert_eq!(list, ["x", "a", "c", "b"]);
+        let mut list2 = Vec::new();
+        FolderLayout::move_in(&mut list2, &shown, "a", true); // already first
+        assert!(list2.is_empty());
+        let mut l = FolderLayout::default();
+        l.toggle("fav");
+        assert!(l.folded.contains("fav"));
+        l.toggle("fav");
+        assert!(l.folded.is_empty());
+    }
 }

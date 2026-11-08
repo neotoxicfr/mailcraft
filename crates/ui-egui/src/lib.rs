@@ -99,6 +99,19 @@ impl MailCraftApp {
             prefs.privacy.block_remote_images,
             prefs.privacy.block_trackers,
         );
+        self.mail.account_order = prefs.folders.accounts.clone();
+        self.mail.folder_order = self
+            .mail
+            .accounts
+            .iter()
+            .filter_map(|a| {
+                prefs
+                    .folders
+                    .folders
+                    .get(&a.email.to_lowercase())
+                    .map(|o| (a.id, o.clone()))
+            })
+            .collect();
         if let Some(b) = &self.backend
             && let Err(e) = self.mail.reload(
                 &b.store,
@@ -272,6 +285,7 @@ impl MailCraftApp {
                 screener: prefs.cleanup.screener,
                 conversations: prefs.appearance.conversations,
                 own_words: &prefs.spell_words,
+                folded: &prefs.folders.folded,
                 suggest: suggest.as_ref().map(|f| f as &shell::Suggest<'_>),
             };
             shell::show(ui, &c, &mut self.view, &mut next)
@@ -458,6 +472,52 @@ impl MailCraftApp {
                 });
             }
             Command::Print => self.print(),
+            Command::ToggleFold { key } => {
+                self.settings.update(|p| p.folders.toggle(&key));
+            }
+            Command::MoveAccount { email, up } => {
+                let current: Vec<String> = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .map(|a| a.email.to_lowercase())
+                    .collect();
+                self.settings.update(|p| {
+                    settings::FolderLayout::move_in(
+                        &mut p.folders.accounts,
+                        &current,
+                        &email.to_lowercase(),
+                        up,
+                    );
+                });
+                self.dirty = true;
+            }
+            Command::MoveFolder { account_id, id, up } => {
+                let email = self
+                    .mail
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == account_id)
+                    .map(|a| a.email.to_lowercase())?;
+                let parent = self
+                    .mail
+                    .folders
+                    .iter()
+                    .find(|f| f.account_id == account_id && f.id == id)
+                    .map(|f| f.parent_id.clone());
+                let siblings: Vec<String> = self
+                    .mail
+                    .folder_tree(account_id)
+                    .into_iter()
+                    .filter(|(f, _)| Some(f.parent_id.clone()) == parent)
+                    .map(|(f, _)| f.id.clone())
+                    .collect();
+                self.settings.update(|p| {
+                    let list = p.folders.folders.entry(email).or_default();
+                    settings::FolderLayout::move_in(list, &siblings, &id, up);
+                });
+                self.dirty = true;
+            }
             Command::Export => {
                 let selected = self.mail.selected_messages();
                 let account_id = selected.first().map(|m| m.account_id)?;
@@ -1158,6 +1218,7 @@ impl MailCraftApp {
                         screener: prefs.cleanup.screener,
                         conversations: prefs.appearance.conversations,
                         own_words: &prefs.spell_words,
+                        folded: &prefs.folders.folded,
                         suggest: suggest.map(|f| f as &shell::Suggest<'_>),
                     };
                     egui::CentralPanel::default().show(ui, |ui| {

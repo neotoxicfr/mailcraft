@@ -146,6 +146,20 @@ pub enum Command {
     Print,
     /// The selected messages as .eml files, in a folder the user picks.
     Export,
+    /// Fold or unfold an entry of the folder pane (see `FolderLayout::folded`).
+    ToggleFold {
+        key: String,
+    },
+    /// One place up or down in the folder pane.
+    MoveAccount {
+        email: String,
+        up: bool,
+    },
+    MoveFolder {
+        account_id: i64,
+        id: String,
+        up: bool,
+    },
     /// Opens the "add an account" dialog.
     AddAccount,
     AddMicrosoftAccount,
@@ -270,6 +284,8 @@ pub struct Ctx<'a> {
     pub screener: bool,
     /// The list groups messages by conversation.
     pub conversations: bool,
+    /// Folded entries of the folder pane.
+    pub folded: &'a std::collections::BTreeSet<String>,
     /// Words the user added to the spell checker.
     pub own_words: &'a [String],
     /// Address completion: (account, typed text) → (name, address).

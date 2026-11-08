@@ -66,6 +66,9 @@ pub struct Mail {
     /// The message's HTML prepared for the original view (inline images embedded, CSP added).
     pub original_html: String,
     body_key: Option<(i64, String)>,
+    /// The user's order: account addresses, and folder ids per account id.
+    pub account_order: Vec<String>,
+    pub folder_order: HashMap<i64, Vec<String>>,
     /// Image blocking applied to the shown message: (remote images, tracking pixels).
     pub blocking: (bool, bool),
     blocking_applied: (bool, bool),
@@ -106,6 +109,13 @@ impl Mail {
         }
         self.encrypted = Some(store.is_encrypted());
         self.accounts = store.accounts()?;
+        let rank = |email: &str| {
+            self.account_order
+                .iter()
+                .position(|e| e.eq_ignore_ascii_case(email))
+                .unwrap_or(usize::MAX)
+        };
+        self.accounts.sort_by_key(|a| rank(&a.email));
         self.folders.clear();
         for a in &self.accounts {
             self.folders.extend(store.folders(a.id)?);
@@ -268,7 +278,11 @@ impl Mail {
     /// The account's folders, tree order, with their depth (1 for top level).
     pub fn folder_tree(&self, account_id: i64) -> Vec<(&Folder, usize)> {
         let mut out = Vec::new();
-        tree(&self.folders, account_id, None, 1, &mut out);
+        let order = self
+            .folder_order
+            .get(&account_id)
+            .map_or(&[][..], Vec::as_slice);
+        tree(&self.folders, account_id, None, 1, order, &mut out);
         out
     }
 
@@ -280,12 +294,14 @@ impl Mail {
     }
 }
 
-/// Depth-first: well-known folders first in Outlook's order, then the others by name.
+/// Depth-first: the user's order first, then well-known folders in Outlook's order, then the
+/// others by name.
 fn tree<'a>(
     all: &'a [Folder],
     account: i64,
     parent: Option<&str>,
     depth: usize,
+    order: &[String],
     out: &mut Vec<(&'a Folder, usize)>,
 ) {
     let mut level: Vec<&Folder> = all
@@ -298,14 +314,16 @@ fn tree<'a>(
             .and_then(|r| ROLES.iter().position(|x| *x == r))
             .unwrap_or(ROLES.len())
     };
+    let mine = |f: &Folder| order.iter().position(|x| *x == f.id).unwrap_or(usize::MAX);
     level.sort_by(|a, b| {
-        rank(a)
-            .cmp(&rank(b))
+        mine(a)
+            .cmp(&mine(b))
+            .then_with(|| rank(a).cmp(&rank(b)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     for f in level {
         out.push((f, depth));
-        tree(all, account, Some(&f.id), depth + 1, out);
+        tree(all, account, Some(&f.id), depth + 1, order, out);
     }
 }
 

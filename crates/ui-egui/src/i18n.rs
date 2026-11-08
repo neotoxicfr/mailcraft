@@ -78,6 +78,9 @@ pub enum T {
     SearchHint,
     SearchFilters,
     AllInboxes,
+    MoveUp,
+    MoveDown,
+    FoldFolder,
     GoogleAccount,
     SpellLearn,
     SpellNoSuggestion,
@@ -390,6 +393,12 @@ impl T {
             ),
             Self::SearchHint => ("Rechercher dans la boîte aux lettres", "Search the mailbox"),
             Self::AllInboxes => ("Toutes les boîtes de réception", "All inboxes"),
+            Self::MoveUp => ("Monter", "Move up"),
+            Self::MoveDown => ("Descendre", "Move down"),
+            Self::FoldFolder => (
+                "Replier ou déplier les sous-dossiers",
+                "Fold or unfold the sub-folders",
+            ),
             Self::GoogleAccount => (
                 "Compte Google (Gmail), connexion par le navigateur…",
                 "Google account (Gmail), browser sign-in…",

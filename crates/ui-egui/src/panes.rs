@@ -67,8 +67,9 @@ pub fn folder_pane(
         return;
     }
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        section_title(ui, T::Favorites.get(c.lang));
-        if mail.accounts.len() > 1 {
+        let fav_open = !c.folded.contains("fav");
+        fold_title(ui, c, T::Favorites.get(c.lang), "fav", fav_open, command);
+        if fav_open && mail.accounts.len() > 1 {
             let inboxes = mail
                 .folders
                 .iter()
@@ -85,7 +86,10 @@ pub fn folder_pane(
             folder_row(ui, c, &all, 1, &mut None, command);
         }
         // Inbox, Sent, Deleted: in that order, for every account.
-        for role in ["inbox", "sentitems", "deleteditems"] {
+        for role in ["inbox", "sentitems", "deleteditems"]
+            .into_iter()
+            .filter(|_| fav_open)
+        {
             for f in mail
                 .folders
                 .iter()
@@ -95,6 +99,7 @@ pub fn folder_pane(
             }
         }
         if c.screener
+            && fav_open
             && let Some(inbox) = mail
                 .folders
                 .iter()
@@ -112,18 +117,114 @@ pub fn folder_pane(
             };
             folder_row(ui, c, &screen, 1, &mut None, command);
         }
-        for account in &mail.accounts {
+        let count = mail.accounts.len();
+        for (i, account) in mail.accounts.iter().enumerate() {
             ui.add_space(8.0);
-            section_title(ui, &account.email);
+            let email = account.email.to_lowercase();
+            let key = format!("a:{email}");
+            let open = !c.folded.contains(&key);
+            let title = fold_title(ui, c, &account.email, &key, open, command);
+            title.context_menu(|ui| {
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(T::MoveUp.get(c.lang)))
+                    .clicked()
+                {
+                    *command = Some(Command::MoveAccount {
+                        email: account.email.clone(),
+                        up: true,
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(i + 1 < count, egui::Button::new(T::MoveDown.get(c.lang)))
+                    .clicked()
+                {
+                    *command = Some(Command::MoveAccount {
+                        email: account.email.clone(),
+                        up: false,
+                    });
+                    ui.close();
+                }
+            });
+            if !open {
+                continue;
+            }
+            // Folded folders hide everything below them.
+            let mut hidden_below: Option<usize> = None;
             for (f, depth) in mail.folder_tree(account.id) {
-                folder_row(ui, c, f, depth, dialog, command);
+                if let Some(d) = hidden_below {
+                    if depth > d {
+                        continue;
+                    }
+                    hidden_below = None;
+                }
+                let has_children = mail
+                    .folders
+                    .iter()
+                    .any(|x| x.account_id == account.id && x.parent_id.as_deref() == Some(&f.id));
+                let fold_key = format!("f:{email}:{}", f.id);
+                let folded = has_children && c.folded.contains(&fold_key);
+                if folded {
+                    hidden_below = Some(depth);
+                }
+                let fold = has_children.then_some((fold_key.as_str(), !folded));
+                folder_row_with(ui, c, f, depth, fold, true, dialog, command);
             }
         }
     });
 }
 
-fn section_title(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).font(semibold(13.0)));
+/// A small triangle: pointing down when open, right when folded.
+fn paint_fold(ui: &Ui, center: egui::Pos2, open: bool, color: Color32) {
+    let points = if open {
+        vec![
+            center + vec2(-4.0, -2.0),
+            center + vec2(4.0, -2.0),
+            center + vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            center + vec2(-2.0, -4.0),
+            center + vec2(3.0, 0.0),
+            center + vec2(-2.0, 4.0),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+/// Section heading that folds what is under it (Favorites, an account).
+fn fold_title(
+    ui: &mut Ui,
+    c: &Ctx<'_>,
+    text: &str,
+    key: &str,
+    open: bool,
+    command: &mut Option<Command>,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(Role::TreeItem, true, open, text));
+    let color = ui.visuals().text_color();
+    paint_fold(
+        ui,
+        rect.left_center() + vec2(6.0, 0.0),
+        open,
+        ui.visuals().weak_text_color(),
+    );
+    let galley = one_line(ui, text, semibold(13.0), color, width - 20.0);
+    ui.painter().galley(
+        pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    if response.clicked() {
+        *command = Some(Command::ToggleFold {
+            key: key.to_owned(),
+        });
+    }
+    let _ = c;
+    response
 }
 
 fn folder_row(
@@ -131,6 +232,22 @@ fn folder_row(
     c: &Ctx<'_>,
     f: &Folder,
     depth: usize,
+    dialog: &mut Option<Dialog>,
+    command: &mut Option<Command>,
+) {
+    folder_row_with(ui, c, f, depth, None, false, dialog, command);
+}
+
+/// A folder row; `fold` (key, open) draws the fold triangle of a folder with sub-folders,
+/// `movable` offers Move up / Move down in its menu.
+#[allow(clippy::too_many_arguments)]
+fn folder_row_with(
+    ui: &mut Ui,
+    c: &Ctx<'_>,
+    f: &Folder,
+    depth: usize,
+    fold: Option<(&str, bool)>,
+    movable: bool,
     dialog: &mut Option<Dialog>,
     command: &mut Option<Command>,
 ) {
@@ -159,7 +276,20 @@ fn folder_row(
             egui::StrokeKind::Inside,
         );
     }
-    let x = rect.left() + 6.0 + depth as f32 * 12.0;
+    let x = rect.left() + 10.0 + depth as f32 * 12.0;
+    let mut toggled = false;
+    if let Some((key, open)) = fold {
+        let arrow = Rect::from_center_size(pos2(x - 9.0, rect.center().y), vec2(14.0, FOLDER_ROW));
+        let r = ui.interact(arrow, ui.scope_id().with(("fold", key)), Sense::click());
+        r.widget_info(|| WidgetInfo::selected(Role::Button, true, open, T::FoldFolder.get(c.lang)));
+        paint_fold(ui, arrow.center(), open, ui.visuals().weak_text_color());
+        if r.clicked() {
+            toggled = true;
+            *command = Some(Command::ToggleFold {
+                key: key.to_owned(),
+            });
+        }
+    }
     let text = ui.visuals().text_color();
     let (font, count_text) = if f.unread > 0 {
         (semibold(13.0), f.unread.to_string())
@@ -190,7 +320,7 @@ fn folder_row(
         *command = Some(Command::MoveTo {
             folder_id: f.id.clone(),
         });
-    } else if response.clicked() {
+    } else if response.clicked() && !toggled {
         *command = Some(Command::SelectFolder {
             account_id: f.account_id,
             folder_id: f.id.clone(),
@@ -198,6 +328,19 @@ fn folder_row(
     }
     let lang = c.lang;
     response.context_menu(|ui| {
+        if movable {
+            for (up, label) in [(true, T::MoveUp), (false, T::MoveDown)] {
+                if ui.button(label.get(lang)).clicked() {
+                    *command = Some(Command::MoveFolder {
+                        account_id: f.account_id,
+                        id: f.id.clone(),
+                        up,
+                    });
+                    ui.close();
+                }
+            }
+            ui.separator();
+        }
         if ui.button(T::NewSubfolder.get(lang)).clicked() {
             *dialog = Some(crate::shell::folder_name_dialog(
                 f.account_id,

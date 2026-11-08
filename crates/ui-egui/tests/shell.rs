@@ -566,3 +566,28 @@ fn rules_dialog_adds_a_rule() {
     assert_eq!(rules[0].from_contains, "Shop");
     assert_eq!(rules[0].action, mailcraft_sync::RuleAction::MarkRead);
 }
+
+#[test]
+fn folder_pane_folds_and_reorders() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = mailbox(dir.path().to_owned());
+    h.run();
+    h.get_by_label("Factures");
+    // Fold the inbox sub-folders, then the whole account.
+    h.get_by_label("Replier ou déplier les sous-dossiers")
+        .click();
+    h.run();
+    assert!(h.query_by_label("Factures").is_none());
+    h.get_by_label("user@example.com").click();
+    h.run();
+    assert!(
+        h.query_by_label("Éléments supprimés").is_some(),
+        "still in Favourites"
+    );
+    let folded = h.state().as_ref().unwrap().prefs().folders.folded.clone();
+    assert!(folded.contains("a:user@example.com"));
+    assert!(folded.iter().any(|k| k.starts_with("f:user@example.com:")));
+    h.get_by_label("Favoris").click();
+    h.run();
+    assert!(h.query_by_label("Éléments supprimés").is_none());
+}
