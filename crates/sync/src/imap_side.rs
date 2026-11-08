@@ -286,6 +286,23 @@ impl Runner {
             self.imap_sync_folder(account_id, folder, false, emit)?;
             self.serve_urgent(emit);
         }
+        // Views (Gmail's All Mail, Starred, Important) hold copies of other folders' mail: none
+        // in the local copy (a server once listed without their role got them synced).
+        for view in folders.iter().filter(|f| views.contains(&f.id)) {
+            let ids: Vec<String> = self
+                .store
+                .messages(account_id, &view.id, "", usize::MAX >> 1)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            if !ids.is_empty() {
+                self.store
+                    .apply_changes(account_id, &view.id, &[], &ids)
+                    .map_err(|e| e.to_string())?;
+                emit(Event::Changed);
+            }
+        }
         Ok(())
     }
 

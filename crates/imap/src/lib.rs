@@ -328,6 +328,11 @@ pub struct Imap {
     can_move: bool,
     /// CONDSTORE: STATUS gives a change counter (HIGHESTMODSEQ).
     condstore: bool,
+    /// LIST-STATUS (RFC 5819): the folder list and every folder's STATUS in one command.
+    list_status: bool,
+    /// SPECIAL-USE: with an extended LIST (as LIST-STATUS is) the folder roles (Sent, Trash,
+    /// Gmail's All Mail…) only come back when asked for.
+    special_use: bool,
     selected: Option<String>,
 }
 
@@ -353,14 +358,23 @@ impl Imap {
         } else {
             client.login(user, &s.password).map_err(refused)?
         };
-        let (can_move, condstore) = session
+        let (can_move, condstore, list_status, special_use) = session
             .capabilities()
-            .map(|c| (c.has_str("MOVE"), c.has_str("CONDSTORE")))
-            .unwrap_or((false, false));
+            .map(|c| {
+                (
+                    c.has_str("MOVE"),
+                    c.has_str("CONDSTORE"),
+                    c.has_str("LIST-STATUS"),
+                    c.has_str("SPECIAL-USE"),
+                )
+            })
+            .unwrap_or((false, false, false, false));
         Ok(Self {
             session,
             can_move,
             condstore,
+            list_status,
+            special_use,
             selected: None,
         })
     }
@@ -414,10 +428,30 @@ impl Imap {
     }
 
     pub fn folders(&mut self) -> Result<Vec<RemoteFolder>> {
+        // With LIST-STATUS the counts and states come with the list: one round trip instead
+        // of one STATUS per folder. The STATUS answers arrive as unsolicited responses.
+        // Only with SPECIAL-USE, which must then be asked for explicitly: an extended LIST
+        // without it drops the roles, and Gmail's views would be synced as folders.
+        let pattern = if self.list_status && self.special_use {
+            format!("* RETURN (SPECIAL-USE STATUS {})", self.status_items())
+        } else {
+            "*".to_owned()
+        };
         let names = self
             .session
-            .list(Some(""), Some("*"))
+            .list(Some(""), Some(&pattern))
             .map_err(Error::from)?;
+        let mut listed: HashMap<String, Vec<imap_proto::StatusAttribute>> = self
+            .session
+            .take_all_unsolicited()
+            .filter_map(|r| match r {
+                imap::types::UnsolicitedResponse::Status {
+                    mailbox,
+                    attributes,
+                } => Some((mailbox, attributes)),
+                _ => None,
+            })
+            .collect();
         let mut raw: Vec<(String, Option<String>, Option<&'static str>, bool)> = Vec::new();
         for n in names.iter() {
             let attrs = n.attributes();
@@ -451,7 +485,8 @@ impl Imap {
         let mut out = Vec::new();
         for (id, parent, role, is_view) in raw {
             let role = role.filter(|r| taken.insert(*r));
-            let (unread, total, state) = match self.status(&id) {
+            let listed = listed.remove(&id).map(|attrs| status_of(&attrs));
+            let (unread, total, state) = match listed.map_or_else(|| self.status(&id), Ok) {
                 Ok((m, state)) => (i64::from(m.unseen.unwrap_or(0)), i64::from(m.exists), state),
                 Err(e @ (imap::Error::Io(_) | imap::Error::ConnectionLost)) => {
                     return Err(e.into());
@@ -484,17 +519,18 @@ impl Imap {
     /// when the server gives a change counter (CONDSTORE): an unchanged signature means nothing
     /// in the folder changed, not even a read mark.
     fn status(&mut self, mailbox: &str) -> imap::Result<(imap::types::Mailbox, Option<String>)> {
-        let items = if self.condstore {
+        let items = self.status_items();
+        let m = self.session.status(mailbox, items)?;
+        let state = state_of(&m);
+        Ok((m, state))
+    }
+
+    fn status_items(&self) -> &'static str {
+        if self.condstore {
             "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
         } else {
             "(MESSAGES UNSEEN)"
-        };
-        let m = self.session.status(mailbox, items)?;
-        let state = match (m.uid_validity, m.uid_next, m.highest_mod_seq) {
-            (Some(v), Some(n), Some(q)) => Some(format!("{v}:{n}:{}:{q}", m.exists)),
-            _ => None,
-        };
-        Ok((m, state))
+        }
     }
 
     /// The state signature of one folder (see [`Self::status`]), `None` without CONDSTORE.
@@ -748,6 +784,32 @@ impl imap::Authenticator for XOauth2 {
     fn process(&self, _challenge: &[u8]) -> Self::Response {
         format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.token)
     }
+}
+
+fn state_of(m: &imap::types::Mailbox) -> Option<String> {
+    match (m.uid_validity, m.uid_next, m.highest_mod_seq) {
+        (Some(v), Some(n), Some(q)) => Some(format!("{v}:{n}:{}:{q}", m.exists)),
+        _ => None,
+    }
+}
+
+/// A STATUS answer received with the folder list (LIST-STATUS), as STATUS gives it.
+fn status_of(attrs: &[imap_proto::StatusAttribute]) -> (imap::types::Mailbox, Option<String>) {
+    use imap_proto::StatusAttribute as A;
+    let mut m = imap::types::Mailbox::default();
+    for a in attrs {
+        match *a {
+            A::Messages(n) => m.exists = n,
+            A::Unseen(n) => m.unseen = Some(n),
+            A::UidNext(n) => m.uid_next = Some(n),
+            A::UidValidity(n) => m.uid_validity = Some(n),
+            A::HighestModSeq(n) => m.highest_mod_seq = Some(n),
+            A::Recent(n) => m.recent = n,
+            _ => {}
+        }
+    }
+    let state = state_of(&m);
+    (m, state)
 }
 
 fn read_flagged(flags: &[Flag<'_>]) -> (bool, bool) {
