@@ -84,7 +84,7 @@ pub fn never_reply_to(address: &str, own: &[String]) -> bool {
 /// One reply per sender per this many seconds (4 days, like Exchange).
 const REPLY_EVERY: i64 = 4 * 24 * 3600;
 /// Newest inbox message already looked at, per account (store mark).
-const MARK: &str = "automation";
+pub(crate) const MARK: &str = "automation";
 
 impl Runner {
     /// Rules and the local out-of-office reply, on the inbox messages that arrived since the
@@ -102,13 +102,11 @@ impl Runner {
             .collect();
         let imap = self.is_imap(account_id);
         let away = self.away.clone().filter(|a| imap && a.active(unix_now()));
-        let Some(inbox) = self
-            .store
-            .folders(account_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|f| f.role.as_deref() == Some("inbox"))
-        else {
+        // Nothing to do: no store reads (this runs every 20 s). New rules reset the mark.
+        if rules.is_empty() && away.is_none() {
+            return Ok(());
+        }
+        let Some(inbox) = self.inbox_of(account_id)? else {
             return Ok(());
         };
         let recent = self

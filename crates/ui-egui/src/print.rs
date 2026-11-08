@@ -20,11 +20,6 @@ pub fn page(
     lang: Lang,
     (block_images, block_trackers): (bool, bool),
 ) -> String {
-    let images = if block_images {
-        "data:"
-    } else {
-        "data: https: http:"
-    };
     let from = if m.from_name.is_empty() {
         escape(&m.from_addr)
     } else {
@@ -53,19 +48,16 @@ pub fn page(
             escape(&body.text)
         )
     } else {
-        if block_trackers && !block_images {
-            mailcraft_html::without_trackers(&body.html)
-        } else {
-            body.html.clone()
-        }
+        mailcraft_html::prepare(&body.html, block_images, block_trackers).into_owned()
     };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
-<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src {images}; script-src 'nonce-mailcraftprint'\">\
+<meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\">\
 <title>{}</title><style>body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#242424}}</style></head>\
 <body>{header}<div>{content}</div>\
 <script nonce=\"mailcraftprint\">window.addEventListener('load',function(){{window.print();}});</script></body></html>",
-        escape(&m.subject)
+        escape(&m.subject),
+        policy = mailcraft_html::page_policy(block_images, Some("mailcraftprint")),
     )
 }
 
@@ -136,7 +128,7 @@ mod tests {
         };
         let html = page(&m("Facture"), &body, "08/11/2026", Lang::Fr, (true, true));
         assert!(html.contains("script-src 'nonce-mailcraftprint'"));
-        assert!(html.contains("img-src data:;"));
+        assert!(html.contains("img-src data:;") && html.contains("default-src 'none'"));
         assert!(html.contains("Shop &lt;b&gt;"));
         assert!(html.contains("window.print()"));
     }

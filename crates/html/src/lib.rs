@@ -144,22 +144,30 @@ fn safe_link(href: &str) -> Option<String> {
         .then(|| h.to_owned())
 }
 
+/// The `style` attribute lowercased and without spaces (`display:none`, `width:1px`…).
+fn compact_style(el: &ElementRef<'_>) -> Option<String> {
+    el.value().attr("style").map(|s| {
+        s.to_ascii_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    })
+}
+
+/// Hidden by its style: `display:none` or `visibility:hidden`.
+fn style_hides(s: &str) -> bool {
+    s.contains("display:none") || s.contains("visibility:hidden")
+}
+
 fn hidden(el: &ElementRef<'_>) -> bool {
     let v = el.value();
     if v.attr("hidden").is_some() || v.attr("aria-hidden") == Some("true") {
         return true;
     }
-    v.attr("style").is_some_and(|s| {
-        let s: String = s
-            .to_ascii_lowercase()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        // Not `font-size:0` alone: MJML and other layouts set it on containers to remove gaps
-        // between columns and give the text inside its size back (a whole booking confirmation vanished).
-        s.contains("display:none")
-            || s.contains("visibility:hidden")
-            || (s.contains("max-height:0") && s.contains("overflow:hidden"))
+    // Not `font-size:0` alone: MJML and other layouts set it on containers to remove gaps
+    // between columns and give the text inside its size back (a whole booking confirmation vanished).
+    compact_style(el).is_some_and(|s| {
+        style_hides(&s) || (s.contains("max-height:0") && s.contains("overflow:hidden"))
     })
 }
 
@@ -187,7 +195,7 @@ fn background_image(el: &ElementRef<'_>) -> Option<String> {
 
 /// A 1×1 (or 0×0) image is a tracking pixel, not content.
 /// Known open-tracking addresses (mailing services, sales tools). Matched on the lowercased URL.
-const TRACKER_MARKS: [&str; 16] = [
+const TRACKER_MARKS: &[&str] = &[
     "/track/open",
     "/wf/open",
     "/open.php",
@@ -209,22 +217,22 @@ const TRACKER_MARKS: [&str; 16] = [
 /// An image whose only purpose is to tell the sender the mail was opened: 1 px wide or high,
 /// hidden by its style, or served by a known open-tracking address.
 fn is_tracker(el: &ElementRef<'_>) -> bool {
-    let src = el.value().attr("src").unwrap_or("").to_ascii_lowercase();
-    let styled_hidden = el.value().attr("style").is_some_and(|s| {
-        let s: String = s
-            .to_ascii_lowercase()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        s.contains("display:none")
-            || s.contains("visibility:hidden")
-            || s.contains("opacity:0;")
-            || s.ends_with("opacity:0")
-            || ["width:0", "width:1px", "height:0", "height:1px"]
-                .iter()
-                .any(|w| s.split(';').any(|d| d == *w))
+    let styled_hidden = compact_style(el).is_some_and(|s| {
+        style_hides(&s)
+            || s.split(';').any(|d| {
+                matches!(
+                    d,
+                    "opacity:0" | "width:0" | "width:1px" | "height:0" | "height:1px"
+                )
+            })
     });
-    tracking_pixel(el) || styled_hidden || TRACKER_MARKS.iter().any(|m| src.contains(m))
+    tracking_pixel(el) || styled_hidden || el.value().attr("src").is_some_and(known_tracker)
+}
+
+/// A known open-tracking address.
+fn known_tracker(src: &str) -> bool {
+    let src = src.to_ascii_lowercase();
+    TRACKER_MARKS.iter().any(|m| src.contains(m))
 }
 
 /// Addresses of the tracking pixels of a message, as written in its HTML.
@@ -251,13 +259,38 @@ pub fn without_trackers(html: &str) -> String {
     let mut out = html.to_owned();
     for url in tracker_urls(html) {
         let escaped = url.replace('&', "&amp;");
+        // Only the whole `src` value: the same address elsewhere (a link, a longer image
+        // address starting with it) stays as it is.
         for form in [url.as_str(), escaped.as_str()] {
-            if !form.is_empty() {
-                out = out.replace(form, "");
+            for quote in ['"', '\''] {
+                out = out.replace(&format!("src={quote}{form}{quote}"), "src=\"\"");
             }
         }
     }
     out
+}
+
+/// The message's HTML with its tracking pixels removed when they are blocked and remote images
+/// are not (blocking every remote image already covers them).
+pub fn prepare(html: &str, block_remote: bool, block_trackers: bool) -> std::borrow::Cow<'_, str> {
+    if block_trackers && !block_remote {
+        std::borrow::Cow::Owned(without_trackers(html))
+    } else {
+        std::borrow::Cow::Borrowed(html)
+    }
+}
+
+/// Content security policy for a page showing a message (original view, printing): no script
+/// but the one with `script_nonce`, no frame or form; remote images, styles, fonts and media
+/// only when remote content is allowed.
+pub fn page_policy(block_remote: bool, script_nonce: Option<&str>) -> String {
+    let remote = if block_remote { "" } else { " https: http:" };
+    let script = script_nonce.map_or_else(|| "'none'".to_owned(), |n| format!("'nonce-{n}'"));
+    format!(
+        "default-src 'none'; style-src 'unsafe-inline'{remote}; img-src data:{remote}; \
+         font-src data:{remote}; media-src 'none'{remote}; script-src {script}; \
+         frame-src 'none'; form-action 'none'; base-uri 'none'"
+    )
 }
 
 fn tracking_pixel(el: &ElementRef<'_>) -> bool {
@@ -404,6 +437,7 @@ impl Walker {
         }
         if name != "img"
             && let Some(src) = background_image(&el)
+            && !(self.drop_trackers && known_tracker(&src))
         {
             self.push_block(Kind::Image {
                 src,

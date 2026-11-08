@@ -451,20 +451,8 @@ impl Imap {
         let mut out = Vec::new();
         for (id, parent, role, is_view) in raw {
             let role = role.filter(|r| taken.insert(*r));
-            let items = if self.condstore {
-                "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
-            } else {
-                "(MESSAGES UNSEEN)"
-            };
-            let (unread, total, state) = match self.session.status(&id, items) {
-                Ok(m) => (
-                    i64::from(m.unseen.unwrap_or(0)),
-                    i64::from(m.exists),
-                    match (m.uid_validity, m.uid_next, m.highest_mod_seq) {
-                        (Some(v), Some(n), Some(q)) => Some(format!("{v}:{n}:{}:{q}", m.exists)),
-                        _ => None,
-                    },
-                ),
+            let (unread, total, state) = match self.status(&id) {
+                Ok((m, state)) => (i64::from(m.unseen.unwrap_or(0)), i64::from(m.exists), state),
                 Err(e @ (imap::Error::Io(_) | imap::Error::ConnectionLost)) => {
                     return Err(e.into());
                 }
@@ -490,6 +478,28 @@ impl Imap {
             });
         }
         Ok(out)
+    }
+
+    /// STATUS of a folder, and its state signature `uidvalidity:uidnext:messages:highestmodseq`
+    /// when the server gives a change counter (CONDSTORE): an unchanged signature means nothing
+    /// in the folder changed, not even a read mark.
+    fn status(&mut self, mailbox: &str) -> imap::Result<(imap::types::Mailbox, Option<String>)> {
+        let items = if self.condstore {
+            "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
+        } else {
+            "(MESSAGES UNSEEN)"
+        };
+        let m = self.session.status(mailbox, items)?;
+        let state = match (m.uid_validity, m.uid_next, m.highest_mod_seq) {
+            (Some(v), Some(n), Some(q)) => Some(format!("{v}:{n}:{}:{q}", m.exists)),
+            _ => None,
+        };
+        Ok((m, state))
+    }
+
+    /// The state signature of one folder (see [`Self::status`]), `None` without CONDSTORE.
+    pub fn state(&mut self, mailbox: &str) -> Result<Option<String>> {
+        Ok(self.status(mailbox).map_err(Error::from)?.1)
     }
 
     /// UIDs and flags of the messages received since `since` (unix seconds).

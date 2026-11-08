@@ -36,10 +36,25 @@ fn html_escape(s: &str) -> String {
 
 impl Runner {
     pub(crate) fn is_imap(&self, account_id: i64) -> bool {
-        self.store.accounts().is_ok_and(|list| {
+        if let Some(known) = self.imap_accounts.borrow().get(&account_id) {
+            return *known;
+        }
+        let imap = self.store.accounts().is_ok_and(|list| {
             list.iter()
                 .any(|a| a.id == account_id && a.provider == mailcraft_imap::PROVIDER_IMAP)
-        })
+        });
+        self.imap_accounts.borrow_mut().insert(account_id, imap);
+        imap
+    }
+
+    /// The account's inbox, if it has one.
+    pub(crate) fn inbox_of(&self, account_id: i64) -> Result<Option<Folder>, String> {
+        Ok(self
+            .store
+            .folders(account_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|f| f.role.as_deref() == Some("inbox")))
     }
 
     /// The account's server entry, ready to connect: for a Google sign-in, `password` holds a
@@ -185,23 +200,30 @@ impl Runner {
         Ok(folders)
     }
 
-    /// Inbox only: what the server announced through IDLE.
+    /// Inbox only. `force`: the server announced a change (IDLE); otherwise one STATUS tells
+    /// whether anything changed since the last sync.
     pub(crate) fn imap_sync_inbox(
         &mut self,
         account_id: i64,
+        force: bool,
         emit: &dyn Fn(Event),
     ) -> Result<(), String> {
-        let inbox = self
-            .store
-            .folders(account_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|f| f.role.as_deref() == Some("inbox"));
-        match inbox {
-            // The server just announced a change: never skipped as unchanged.
-            Some(f) => self.imap_sync_folder(account_id, &f, true, emit),
-            None => Ok(()),
+        let Some(inbox) = self.inbox_of(account_id)? else {
+            return Ok(());
+        };
+        if !force {
+            let id = inbox.id.clone();
+            match self.with_imap(account_id, |s| s.state(&id))? {
+                Some(state) => {
+                    self.folder_states
+                        .insert((account_id, inbox.id.clone()), state);
+                }
+                None => {
+                    self.folder_states.remove(&(account_id, inbox.id.clone()));
+                }
+            }
         }
+        self.imap_sync_folder(account_id, &inbox, force, emit)
     }
 
     /// Starts, once per account, a thread that waits on the inbox with IDLE and asks this
@@ -260,13 +282,8 @@ impl Runner {
                 .and_then(|r| mailcraft_store::ROLES.iter().position(|x| *x == r))
                 .unwrap_or(mailcraft_store::ROLES.len())
         });
-        for (i, folder) in order.into_iter().enumerate() {
-            let t = std::time::Instant::now();
+        for folder in order {
             self.imap_sync_folder(account_id, folder, false, emit)?;
-            log::debug!(
-                "sync: imap account {account_id} folder #{i} in {:?}",
-                t.elapsed()
-            );
             self.serve_urgent(emit);
         }
         Ok(())

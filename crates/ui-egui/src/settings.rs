@@ -195,26 +195,15 @@ impl FolderLayout {
         list.extend(order);
     }
 
-    /// Moves `item` one place up or down within `current` (the order as shown) and records the
-    /// result in `list`.
-    pub fn move_in(list: &mut Vec<String>, current: &[String], item: &str, up: bool) {
-        let Some(i) = current.iter().position(|x| x == item) else {
-            return;
-        };
-        let j = if up {
-            match i.checked_sub(1) {
-                Some(j) => j,
-                None => return,
-            }
-        } else if i + 1 < current.len() {
-            i + 1
+    /// Where Move up / Move down puts `item` in `current`: (entry to go next to, after it).
+    /// `None` at either end.
+    pub fn neighbour(current: &[String], item: &str, up: bool) -> Option<(String, bool)> {
+        let i = current.iter().position(|x| x == item)?;
+        if up {
+            Some((current.get(i.checked_sub(1)?)?.clone(), false))
         } else {
-            return;
-        };
-        let mut order = current.to_vec();
-        order.swap(i, j);
-        list.retain(|x| !order.contains(x));
-        list.extend(order);
+            Some((current.get(i + 1)?.clone(), true))
+        }
     }
 }
 
@@ -225,12 +214,15 @@ mod layout_tests {
     #[test]
     fn moving_keeps_other_entries() {
         let shown: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(
+            FolderLayout::neighbour(&shown, "c", true),
+            Some(("b".to_owned(), false))
+        );
+        assert_eq!(FolderLayout::neighbour(&shown, "a", true), None); // already first
+        assert_eq!(FolderLayout::neighbour(&shown, "c", false), None); // already last
         let mut list = vec!["x".to_owned()];
-        FolderLayout::move_in(&mut list, &shown, "c", true);
+        FolderLayout::place(&mut list, &shown, "c", "b", false);
         assert_eq!(list, ["x", "a", "c", "b"]);
-        let mut list2 = Vec::new();
-        FolderLayout::move_in(&mut list2, &shown, "a", true); // already first
-        assert!(list2.is_empty());
         let mut list3 = Vec::new();
         FolderLayout::place(&mut list3, &shown, "a", "c", true);
         assert_eq!(list3, ["b", "c", "a"]);

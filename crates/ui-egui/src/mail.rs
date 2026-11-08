@@ -68,7 +68,8 @@ pub struct Mail {
     body_key: Option<(i64, String)>,
     /// The user's order: account addresses, and folder ids per account id.
     pub account_order: Vec<String>,
-    pub folder_order: HashMap<i64, Vec<String>>,
+    /// Folder ids in the user's order, per account address (lowercase).
+    pub folder_order: std::collections::BTreeMap<String, Vec<String>>,
     /// Image blocking applied to the shown message: (remote images, tracking pixels).
     pub blocking: (bool, bool),
     blocking_applied: (bool, bool),
@@ -276,11 +277,44 @@ impl Mail {
     }
 
     /// The account's folders, tree order, with their depth (1 for top level).
+    /// Account addresses (lowercase) in the order shown.
+    pub fn account_emails(&self) -> Vec<String> {
+        self.accounts
+            .iter()
+            .map(|a| a.email.to_lowercase())
+            .collect()
+    }
+
+    /// A folder's account address and the ids of its siblings (itself included), in the
+    /// order shown.
+    pub fn siblings(&self, account_id: i64, id: &str) -> Option<(String, Vec<String>)> {
+        let email = self
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)?
+            .email
+            .to_lowercase();
+        let parent = &self
+            .folders
+            .iter()
+            .find(|f| f.account_id == account_id && f.id == id)?
+            .parent_id;
+        let ids = self
+            .folder_tree(account_id)
+            .into_iter()
+            .filter(|(f, _)| &f.parent_id == parent)
+            .map(|(f, _)| f.id.clone())
+            .collect();
+        Some((email, ids))
+    }
+
     pub fn folder_tree(&self, account_id: i64) -> Vec<(&Folder, usize)> {
         let mut out = Vec::new();
         let order = self
-            .folder_order
-            .get(&account_id)
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .and_then(|a| self.folder_order.get(&a.email.to_lowercase()))
             .map_or(&[][..], Vec::as_slice);
         tree(&self.folders, account_id, None, 1, order, &mut out);
         out
@@ -315,12 +349,7 @@ fn tree<'a>(
             .unwrap_or(ROLES.len())
     };
     let mine = |f: &Folder| order.iter().position(|x| *x == f.id).unwrap_or(usize::MAX);
-    level.sort_by(|a, b| {
-        mine(a)
-            .cmp(&mine(b))
-            .then_with(|| rank(a).cmp(&rank(b)))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    level.sort_by_cached_key(|f| (mine(f), rank(f), f.name.to_lowercase()));
     for f in level {
         out.push((f, depth));
         tree(all, account, Some(&f.id), depth + 1, order, out);
@@ -340,24 +369,12 @@ pub fn original_html(
     if html.is_empty() {
         return String::new();
     }
-    let cleaned;
-    let html = if trackers && !remote {
-        cleaned = mailcraft_html::without_trackers(html);
-        cleaned.as_str()
-    } else {
-        html
-    };
-    let mut out = String::with_capacity(html.len() + 256);
-    out.push_str(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; object-src 'none'; \
-         frame-src 'none'; form-action 'none'; base-uri 'none'",
-    );
-    // Remote images refused: only the embedded (inline) ones load, CSS backgrounds included.
-    if remote {
-        out.push_str("; img-src data:");
-    }
+    let html = mailcraft_html::prepare(html, remote, trackers);
+    let mut out = String::with_capacity(html.len() + 512);
+    out.push_str("<meta http-equiv=\"Content-Security-Policy\" content=\"");
+    out.push_str(&mailcraft_html::page_policy(remote, None));
     out.push_str("\">");
-    let mut rest = html;
+    let mut rest: &str = &html;
     while let Some(at) = rest.find("cid:") {
         out.push_str(&rest[..at]);
         let after = &rest[at + 4..];
@@ -422,8 +439,9 @@ mod tests {
             (false, true),
         );
         assert!(out.starts_with(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'"
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'"
         ));
+        assert!(out.contains("script-src 'none'"));
         assert!(out.contains("src=\"data:image/png;base64,iVBORwE=\""));
         assert!(out.contains("src='cid:missing'"));
         assert!(original_html("", &inline, (false, true)).is_empty());
@@ -432,7 +450,7 @@ mod tests {
             "<img src=\"https://x.example/a.jpg\"><img src=\"https://x.example/t\" width=\"1\">";
         assert!(original_html(page, &inline, (true, true)).contains("img-src data:"));
         let only_pixels = original_html(page, &inline, (false, true));
-        assert!(!only_pixels.contains("img-src") && only_pixels.contains("a.jpg"));
+        assert!(only_pixels.contains("img-src data: https:") && only_pixels.contains("a.jpg"));
         assert!(!only_pixels.contains("x.example/t"));
         assert!(original_html(page, &inline, (false, false)).contains("x.example/t"));
     }

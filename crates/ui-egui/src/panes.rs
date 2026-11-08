@@ -87,53 +87,8 @@ pub fn folder_pane(
             None,
             command,
         );
-        if fav_open && mail.accounts.len() > 1 {
-            let inboxes = mail
-                .folders
-                .iter()
-                .filter(|f| f.role.as_deref() == Some("inbox"));
-            let all = mailcraft_store::Folder {
-                account_id: mail.accounts[0].id,
-                id: crate::mail::UNIFIED.into(),
-                parent_id: None,
-                name: T::AllInboxes.get(c.lang).into(),
-                role: None,
-                unread: inboxes.map(|f| f.unread).sum(),
-                total: 0,
-            };
-            folder_row(ui, c, &all, 1, &mut None, command);
-        }
-        // Inbox, Sent, Deleted: in that order, for every account.
-        for role in ["inbox", "sentitems", "deleteditems"]
-            .into_iter()
-            .filter(|_| fav_open)
-        {
-            for f in mail
-                .folders
-                .iter()
-                .filter(|f| f.role.as_deref() == Some(role))
-            {
-                folder_row(ui, c, f, 1, dialog, command);
-            }
-        }
-        if c.screener
-            && fav_open
-            && let Some(inbox) = mail
-                .folders
-                .iter()
-                .find(|f| f.role.as_deref() == Some("inbox"))
-        {
-            // Virtual folder: the count is of senders waiting, not of messages.
-            let screen = mailcraft_store::Folder {
-                account_id: inbox.account_id,
-                id: crate::mail::SCREENER.into(),
-                parent_id: None,
-                name: T::ToScreen.get(c.lang).into(),
-                role: None,
-                unread: mail.screening as i64,
-                total: 0,
-            };
-            folder_row(ui, c, &screen, 1, &mut None, command);
+        if fav_open {
+            favourites(ui, c, dialog, command);
         }
         let count = mail.accounts.len();
         for (i, account) in mail.accounts.iter().enumerate() {
@@ -175,29 +130,83 @@ pub fn folder_pane(
             if !open {
                 continue;
             }
-            // Folded folders hide everything below them.
+            // Folded folders hide everything below them. A folder has sub-folders when the next
+            // row of the tree is deeper.
+            let tree = mail.folder_tree(account.id);
             let mut hidden_below: Option<usize> = None;
-            for (f, depth) in mail.folder_tree(account.id) {
+            for (i, &(f, depth)) in tree.iter().enumerate() {
                 if let Some(d) = hidden_below {
                     if depth > d {
                         continue;
                     }
                     hidden_below = None;
                 }
-                let has_children = mail
-                    .folders
-                    .iter()
-                    .any(|x| x.account_id == account.id && x.parent_id.as_deref() == Some(&f.id));
-                let fold_key = format!("f:{email}:{}", f.id);
-                let folded = has_children && c.folded.contains(&fold_key);
-                if folded {
+                let has_children = tree.get(i + 1).is_some_and(|(_, next)| *next > depth);
+                let fold_key = has_children.then(|| format!("f:{email}:{}", f.id));
+                let open = fold_key.as_ref().is_none_or(|k| !c.folded.contains(k));
+                if !open {
                     hidden_below = Some(depth);
                 }
-                let fold = has_children.then_some((fold_key.as_str(), !folded));
+                let fold = fold_key.as_deref().map(|k| (k, open));
                 folder_row_with(ui, c, f, depth, fold, true, dialog, command);
             }
         }
     });
+}
+
+/// Favourites: all inboxes (several accounts), each account's inbox, sent and deleted items,
+/// and the screener.
+fn favourites(
+    ui: &mut Ui,
+    c: &Ctx<'_>,
+    dialog: &mut Option<Dialog>,
+    command: &mut Option<Command>,
+) {
+    let mail = c.mail;
+    if mail.accounts.len() > 1 {
+        let inboxes = mail
+            .folders
+            .iter()
+            .filter(|f| f.role.as_deref() == Some("inbox"));
+        let all = mailcraft_store::Folder {
+            account_id: mail.accounts[0].id,
+            id: crate::mail::UNIFIED.into(),
+            parent_id: None,
+            name: T::AllInboxes.get(c.lang).into(),
+            role: None,
+            unread: inboxes.map(|f| f.unread).sum(),
+            total: 0,
+        };
+        folder_row(ui, c, &all, 1, &mut None, command);
+    }
+    // Inbox, Sent, Deleted: in that order, for every account.
+    for role in ["inbox", "sentitems", "deleteditems"] {
+        for f in mail
+            .folders
+            .iter()
+            .filter(|f| f.role.as_deref() == Some(role))
+        {
+            folder_row(ui, c, f, 1, dialog, command);
+        }
+    }
+    if c.screener
+        && let Some(inbox) = mail
+            .folders
+            .iter()
+            .find(|f| f.role.as_deref() == Some("inbox"))
+    {
+        // Virtual folder: the count is of senders waiting, not of messages.
+        let screen = mailcraft_store::Folder {
+            account_id: inbox.account_id,
+            id: crate::mail::SCREENER.into(),
+            parent_id: None,
+            name: T::ToScreen.get(c.lang).into(),
+            role: None,
+            unread: mail.screening as i64,
+            total: 0,
+        };
+        folder_row(ui, c, &screen, 1, &mut None, command);
+    }
 }
 
 /// A small triangle: pointing down when open, right when folded.
@@ -289,7 +298,6 @@ fn fold_title(
             key: key.to_owned(),
         });
     }
-    let _ = c;
     response
 }
 
@@ -789,23 +797,12 @@ fn message_row(
                 T::ConversationToggle.get(c.lang),
             )
         });
-        let color = ui.visuals().weak_text_color();
-        let center = arrow.center();
-        let points = if thread.expanded {
-            vec![
-                center + vec2(-4.0, -2.0),
-                center + vec2(4.0, -2.0),
-                center + vec2(0.0, 3.0),
-            ]
-        } else {
-            vec![
-                center + vec2(-2.0, -4.0),
-                center + vec2(3.0, 0.0),
-                center + vec2(-2.0, 4.0),
-            ]
-        };
-        ui.painter()
-            .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        paint_fold(
+            ui,
+            arrow.center(),
+            thread.expanded,
+            ui.visuals().weak_text_color(),
+        );
         toggle = r.clicked();
     }
     let sender_name = if m.from_name.is_empty() {

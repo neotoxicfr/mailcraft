@@ -100,18 +100,7 @@ impl MailCraftApp {
             prefs.privacy.block_trackers,
         );
         self.mail.account_order = prefs.folders.accounts.clone();
-        self.mail.folder_order = self
-            .mail
-            .accounts
-            .iter()
-            .filter_map(|a| {
-                prefs
-                    .folders
-                    .folders
-                    .get(&a.email.to_lowercase())
-                    .map(|o| (a.id, o.clone()))
-            })
-            .collect();
+        self.mail.folder_order.clone_from(&prefs.folders.folders);
         if let Some(b) = &self.backend
             && let Err(e) = self.mail.reload(
                 &b.store,
@@ -171,6 +160,27 @@ impl MailCraftApp {
             format!("{count} {}", i18n::T::NewMessagesWord.get(lang))
         };
         Some((title, subject))
+    }
+
+    /// Puts an account (address) just before or after another one in the folder pane.
+    fn place_account(&mut self, email: &str, target: &str, after: bool) {
+        let current = self.mail.account_emails();
+        self.settings.update(|p| {
+            settings::FolderLayout::place(&mut p.folders.accounts, &current, email, target, after);
+        });
+        self.dirty = true;
+    }
+
+    /// Puts a folder just before or after one of its siblings.
+    fn place_folder(&mut self, account_id: i64, id: &str, target: &str, after: bool) {
+        let Some((email, siblings)) = self.mail.siblings(account_id, id) else {
+            return;
+        };
+        self.settings.update(|p| {
+            let list = p.folders.folders.entry(email).or_default();
+            settings::FolderLayout::place(list, &siblings, id, target, after);
+        });
+        self.dirty = true;
     }
 
     /// Opens the shown message, laid out for paper, in the browser's print dialog.
@@ -476,101 +486,32 @@ impl MailCraftApp {
                 self.settings.update(|p| p.folders.toggle(&key));
             }
             Command::MoveAccount { email, up } => {
-                let current: Vec<String> = self
-                    .mail
-                    .accounts
-                    .iter()
-                    .map(|a| a.email.to_lowercase())
-                    .collect();
-                self.settings.update(|p| {
-                    settings::FolderLayout::move_in(
-                        &mut p.folders.accounts,
-                        &current,
-                        &email.to_lowercase(),
-                        up,
-                    );
-                });
-                self.dirty = true;
+                let current = self.mail.account_emails();
+                let email = email.to_lowercase();
+                if let Some((target, after)) =
+                    settings::FolderLayout::neighbour(&current, &email, up)
+                {
+                    self.place_account(&email, &target, after);
+                }
             }
             Command::PlaceAccount {
                 email,
                 target,
                 after,
-            } => {
-                let current: Vec<String> = self
-                    .mail
-                    .accounts
-                    .iter()
-                    .map(|a| a.email.to_lowercase())
-                    .collect();
-                self.settings.update(|p| {
-                    settings::FolderLayout::place(
-                        &mut p.folders.accounts,
-                        &current,
-                        &email.to_lowercase(),
-                        &target.to_lowercase(),
-                        after,
-                    );
-                });
-                self.dirty = true;
+            } => self.place_account(&email.to_lowercase(), &target.to_lowercase(), after),
+            Command::MoveFolder { account_id, id, up } => {
+                let (_, siblings) = self.mail.siblings(account_id, &id)?;
+                if let Some((target, after)) = settings::FolderLayout::neighbour(&siblings, &id, up)
+                {
+                    self.place_folder(account_id, &id, &target, after);
+                }
             }
             Command::PlaceFolder {
                 account_id,
                 id,
                 target,
                 after,
-            } => {
-                let email = self
-                    .mail
-                    .accounts
-                    .iter()
-                    .find(|a| a.id == account_id)
-                    .map(|a| a.email.to_lowercase())?;
-                let parent = self
-                    .mail
-                    .folders
-                    .iter()
-                    .find(|f| f.account_id == account_id && f.id == id)
-                    .map(|f| f.parent_id.clone());
-                let siblings: Vec<String> = self
-                    .mail
-                    .folder_tree(account_id)
-                    .into_iter()
-                    .filter(|(f, _)| Some(f.parent_id.clone()) == parent)
-                    .map(|(f, _)| f.id.clone())
-                    .collect();
-                self.settings.update(|p| {
-                    let list = p.folders.folders.entry(email).or_default();
-                    settings::FolderLayout::place(list, &siblings, &id, &target, after);
-                });
-                self.dirty = true;
-            }
-            Command::MoveFolder { account_id, id, up } => {
-                let email = self
-                    .mail
-                    .accounts
-                    .iter()
-                    .find(|a| a.id == account_id)
-                    .map(|a| a.email.to_lowercase())?;
-                let parent = self
-                    .mail
-                    .folders
-                    .iter()
-                    .find(|f| f.account_id == account_id && f.id == id)
-                    .map(|f| f.parent_id.clone());
-                let siblings: Vec<String> = self
-                    .mail
-                    .folder_tree(account_id)
-                    .into_iter()
-                    .filter(|(f, _)| Some(f.parent_id.clone()) == parent)
-                    .map(|(f, _)| f.id.clone())
-                    .collect();
-                self.settings.update(|p| {
-                    let list = p.folders.folders.entry(email).or_default();
-                    settings::FolderLayout::move_in(list, &siblings, &id, up);
-                });
-                self.dirty = true;
-            }
+            } => self.place_folder(account_id, &id, &target, after),
             Command::Export => {
                 let selected = self.mail.selected_messages();
                 let account_id = selected.first().map(|m| m.account_id)?;

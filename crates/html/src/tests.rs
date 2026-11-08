@@ -171,3 +171,11 @@ fn tracking_pixels_are_recognised() {
     assert_eq!(images(&parse(html)), 1);
     assert_eq!(images(&parse_with(html, false)), 4); // only the display:none one stays out
 }
+
+#[test]
+fn pixel_removal_touches_only_the_src_value() {
+    let html = r#"<img src="https://x.example/t" width="1"><img src="https://x.example/top.jpg"><a href="https://x.example/t">lien</a>"#;
+    let clean = without_trackers(html);
+    assert!(clean.contains("top.jpg") && clean.contains(r#"href="https://x.example/t""#));
+    assert!(clean.contains(r#"<img src="" width="1">"#), "{clean}");
+}

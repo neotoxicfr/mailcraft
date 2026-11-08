@@ -432,6 +432,13 @@ impl Store {
             .optional()?)
     }
 
+    /// Forgets a mark for every account.
+    pub fn clear_marks(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM marks WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn set_mark(&self, account_id: i64, key: &str, value: i64) -> Result<()> {
         self.conn.execute(
             "INSERT INTO marks (account_id, key, value) VALUES (?1, ?2, ?3)

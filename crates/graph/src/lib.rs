@@ -138,6 +138,12 @@ impl<'a> Graph<'a> {
                 std::thread::sleep(Duration::from_secs(wait.min(60)));
                 continue;
             }
+            // 412: the server was still updating the item (a mail that just arrived gets its own
+            // server-side changes). Seen on a real mailbox; a second try goes through.
+            if status == StatusCode::PRECONDITION_FAILED && attempt == 0 {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
             return match status {
                 s if s.is_success() => {
                     let text = resp
