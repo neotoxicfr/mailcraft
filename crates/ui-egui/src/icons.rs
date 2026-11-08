@@ -10,7 +10,6 @@ pub enum Icon {
     Reply,
     ReplyAll,
     Forward,
-    Folder,
     FolderPlus,
     Rename,
     Flag,
@@ -21,6 +20,10 @@ pub enum Icon {
     Exit,
     Paperclip,
     Gear,
+    Rules,
+    Away,
+    Signature,
+    Move,
 }
 
 type Line = &'static [(f32, f32)];
@@ -60,15 +63,6 @@ const FORWARD: &[Line] = &[
     &[(0.15, 0.82), (0.18, 0.6), (0.32, 0.48), (0.8, 0.48)],
     &[(0.6, 0.28), (0.8, 0.48), (0.6, 0.68)],
 ];
-const FOLDER: &[Line] = &[&[
-    (0.1, 0.25),
-    (0.4, 0.25),
-    (0.48, 0.34),
-    (0.9, 0.34),
-    (0.9, 0.8),
-    (0.1, 0.8),
-    (0.1, 0.25),
-]];
 const FOLDER_PLUS: &[Line] = &[
     &[
         (0.1, 0.25),
@@ -114,20 +108,7 @@ const UNSUBSCRIBE: &[Line] = &[
     &[(0.66, 0.62), (0.92, 0.88)],
     &[(0.92, 0.62), (0.66, 0.88)],
 ];
-const ANALYZE: &[Line] = &[
-    &[
-        (0.42, 0.12),
-        (0.6, 0.18),
-        (0.68, 0.36),
-        (0.6, 0.55),
-        (0.42, 0.62),
-        (0.24, 0.55),
-        (0.16, 0.36),
-        (0.24, 0.18),
-        (0.42, 0.12),
-    ],
-    &[(0.6, 0.55), (0.88, 0.85)],
-];
+const ANALYZE: &[Line] = &[&[(0.6, 0.56), (0.88, 0.85)]];
 const SYNC: &[Line] = &[
     &[
         (0.2, 0.45),
@@ -148,17 +129,12 @@ const SYNC: &[Line] = &[
 ];
 const ADD_ACCOUNT: &[Line] = &[
     &[
-        (0.4, 0.15),
-        (0.53, 0.2),
-        (0.57, 0.33),
-        (0.53, 0.46),
-        (0.4, 0.5),
-        (0.27, 0.46),
-        (0.23, 0.33),
-        (0.27, 0.2),
-        (0.4, 0.15),
+        (0.1, 0.88),
+        (0.13, 0.72),
+        (0.24, 0.62),
+        (0.4, 0.58),
+        (0.56, 0.62),
     ],
-    &[(0.1, 0.88), (0.15, 0.68), (0.4, 0.58), (0.6, 0.62)],
     &[(0.78, 0.55), (0.78, 0.9)],
     &[(0.6, 0.72), (0.96, 0.72)],
 ];
@@ -168,20 +144,104 @@ const EXIT: &[Line] = &[
     &[(0.72, 0.32), (0.9, 0.5), (0.72, 0.68)],
 ];
 
+/// A paper clip: outer loop, then the inner one.
 const PAPERCLIP: &[Line] = &[&[
-    (0.62, 0.3),
-    (0.62, 0.72),
-    (0.55, 0.85),
-    (0.45, 0.85),
-    (0.38, 0.72),
-    (0.38, 0.2),
-    (0.44, 0.1),
-    (0.56, 0.1),
-    (0.62, 0.2),
-    (0.62, 0.3),
+    (0.64, 0.34),
+    (0.64, 0.74),
+    (0.57, 0.87),
+    (0.45, 0.87),
+    (0.37, 0.75),
+    (0.37, 0.24),
+    (0.43, 0.12),
+    (0.53, 0.12),
+    (0.58, 0.23),
+    (0.58, 0.7),
+    (0.53, 0.77),
+    (0.48, 0.73),
+    (0.48, 0.34),
 ]];
+/// Rules: a funnel (filtering incoming mail).
+const RULES: &[Line] = &[&[
+    (0.12, 0.18),
+    (0.88, 0.18),
+    (0.58, 0.52),
+    (0.58, 0.84),
+    (0.42, 0.92),
+    (0.42, 0.52),
+    (0.12, 0.18),
+]];
+/// Automatic replies: an envelope and a clock in front of it.
+const AWAY: &[Line] = &[
+    &[
+        (0.44, 0.62),
+        (0.06, 0.62),
+        (0.06, 0.2),
+        (0.7, 0.2),
+        (0.7, 0.42),
+    ],
+    &[(0.06, 0.22), (0.38, 0.44), (0.7, 0.22)],
+    &[(0.7, 0.56), (0.7, 0.7), (0.8, 0.76)],
+];
+/// Signature: a pen over a handwritten stroke.
+const SIGNATURE: &[Line] = &[
+    &[
+        (0.42, 0.6),
+        (0.47, 0.46),
+        (0.8, 0.13),
+        (0.91, 0.24),
+        (0.58, 0.57),
+        (0.42, 0.6),
+    ],
+    &[(0.72, 0.21), (0.83, 0.32)],
+    &[
+        (0.06, 0.84),
+        (0.14, 0.74),
+        (0.2, 0.84),
+        (0.28, 0.76),
+        (0.34, 0.86),
+        (0.4, 0.8),
+        (0.94, 0.8),
+    ],
+];
+/// Move: a folder with an arrow going out of it.
+const MOVE: &[Line] = &[
+    &[
+        (0.1, 0.25),
+        (0.38, 0.25),
+        (0.46, 0.34),
+        (0.82, 0.34),
+        (0.82, 0.44),
+    ],
+    &[(0.82, 0.7), (0.82, 0.8), (0.1, 0.8), (0.1, 0.25)],
+    &[(0.36, 0.57), (0.96, 0.57)],
+    &[(0.8, 0.44), (0.96, 0.57), (0.8, 0.7)],
+];
 
 impl Icon {
+    #[cfg(test)]
+    pub const ALL: [Self; 20] = [
+        Self::Envelope,
+        Self::Trash,
+        Self::Archive,
+        Self::Reply,
+        Self::ReplyAll,
+        Self::Forward,
+        Self::FolderPlus,
+        Self::Rename,
+        Self::Flag,
+        Self::Unsubscribe,
+        Self::Analyze,
+        Self::Sync,
+        Self::AddAccount,
+        Self::Exit,
+        Self::Paperclip,
+        Self::Gear,
+        Self::Rules,
+        Self::Away,
+        Self::Signature,
+        Self::Move,
+    ];
+
     fn lines(self) -> &'static [Line] {
         match self {
             Self::Envelope => ENVELOPE,
@@ -190,7 +250,6 @@ impl Icon {
             Self::Reply => REPLY,
             Self::ReplyAll => REPLY_ALL,
             Self::Forward => FORWARD,
-            Self::Folder => FOLDER,
             Self::FolderPlus => FOLDER_PLUS,
             Self::Rename => RENAME,
             Self::Flag => FLAG,
@@ -200,7 +259,11 @@ impl Icon {
             Self::AddAccount => ADD_ACCOUNT,
             Self::Exit => EXIT,
             Self::Paperclip => PAPERCLIP,
-            Self::Gear => GEAR,
+            Self::Gear => &[],
+            Self::Rules => RULES,
+            Self::Away => AWAY,
+            Self::Signature => SIGNATURE,
+            Self::Move => MOVE,
         }
     }
 
@@ -216,27 +279,83 @@ impl Icon {
         for line in self.lines() {
             painter.add(Shape::line(line.iter().copied().map(at).collect(), stroke));
         }
+        let size = rect.width().min(rect.height());
+        for &(x, y, r) in self.circles() {
+            painter.circle_stroke(at((x, y)), r * size, stroke);
+        }
+        if self == Self::Gear {
+            // Eight teeth around a ring, and the hole.
+            let c = at((0.5, 0.5));
+            let (outer, inner) = (0.44 * size, 0.33 * size);
+            let mut points = Vec::with_capacity(33);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                for (da, r) in [(-0.3, inner), (-0.17, outer), (0.17, outer), (0.3, inner)] {
+                    let t = a + da;
+                    points.push(c + egui::vec2(t.cos(), t.sin()) * r);
+                }
+            }
+            points.push(points[0]);
+            painter.add(Shape::line(points, stroke));
+            painter.circle_stroke(c, 0.13 * size, stroke);
+        }
+    }
+
+    /// Circles: (centre x, centre y, radius) in the unit square.
+    fn circles(self) -> &'static [(f32, f32, f32)] {
+        match self {
+            Self::Analyze => &[(0.4, 0.37, 0.25)],
+            Self::AddAccount => &[(0.4, 0.31, 0.17)],
+            Self::Away => &[(0.7, 0.68, 0.22)],
+            _ => &[],
+        }
     }
 }
 
-const GEAR: &[Line] = &[
-    &[
-        (0.5, 0.3),
-        (0.64, 0.36),
-        (0.7, 0.5),
-        (0.64, 0.64),
-        (0.5, 0.7),
-        (0.36, 0.64),
-        (0.3, 0.5),
-        (0.36, 0.36),
-        (0.5, 0.3),
-    ],
-    &[(0.5, 0.1), (0.5, 0.22)],
-    &[(0.5, 0.78), (0.5, 0.9)],
-    &[(0.1, 0.5), (0.22, 0.5)],
-    &[(0.78, 0.5), (0.9, 0.5)],
-    &[(0.22, 0.22), (0.3, 0.3)],
-    &[(0.7, 0.7), (0.78, 0.78)],
-    &[(0.78, 0.22), (0.7, 0.3)],
-    &[(0.22, 0.78), (0.3, 0.7)],
-];
+#[cfg(test)]
+mod gallery {
+    use super::Icon;
+
+    /// Every icon at ribbon size and large, for a visual review (needs a GPU).
+    #[test]
+    #[ignore = "writes target/shots/icons.png"]
+    fn icons_sheet() {
+        let all = Icon::ALL;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(120.0 * all.len() as f32 / 2.0, 330.0))
+            .wgpu()
+            .build_ui(move |ui| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, egui::Color32::WHITE);
+                let ink = egui::Color32::from_rgb(0x0F, 0x6C, 0xBD);
+                for (i, icon) in all.iter().enumerate() {
+                    let col = (i % (all.len().div_ceil(2))) as f32;
+                    let row = (i / all.len().div_ceil(2)) as f32;
+                    let x = 10.0 + col * 120.0;
+                    let y = 10.0 + row * 160.0;
+                    icon.paint(
+                        ui.painter(),
+                        egui::Rect::from_min_size(egui::pos2(x, y), egui::Vec2::splat(30.0)),
+                        ink,
+                    );
+                    icon.paint(
+                        ui.painter(),
+                        egui::Rect::from_min_size(egui::pos2(x + 40.0, y), egui::Vec2::splat(64.0)),
+                        ink,
+                    );
+                    ui.painter().text(
+                        egui::pos2(x, y + 110.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{icon:?}"),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::BLACK,
+                    );
+                }
+            });
+        h.run();
+        let image = h.render().expect("render");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        std::fs::create_dir_all(&dir).unwrap();
+        image.save(dir.join("icons.png")).unwrap();
+    }
+}

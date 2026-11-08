@@ -856,7 +856,7 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                     command = Some(Command::AddAccount);
                 }
                 if let Some(account) = c.mail.accounts.first()
-                    && big_button(ui, c, Icon::Rename, T::Signature, true, "").clicked()
+                    && big_button(ui, c, Icon::Signature, T::Signature, true, "").clicked()
                 {
                     let text = prefs
                         .accounts
@@ -870,12 +870,12 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                     });
                 }
                 let has_account = !c.mail.accounts.is_empty();
-                if big_button(ui, c, Icon::Folder, T::Rules, has_account, "").clicked() {
+                if big_button(ui, c, Icon::Rules, T::Rules, has_account, "").clicked() {
                     view.dialog = Some(Dialog::Rules {
                         draft: Box::default(),
                     });
                 }
-                if big_button(ui, c, Icon::Reply, T::AwayButton, has_account, "").clicked() {
+                if big_button(ui, c, Icon::Away, T::AwayButton, has_account, "").clicked() {
                     view.dialog = Some(Dialog::Away {
                         until: prefs
                             .away
@@ -945,7 +945,7 @@ fn ribbon(ui: &mut Ui, c: &Ctx<'_>, view: &mut View, prefs: &mut Prefs) -> Optio
                 });
             });
             group(ui, c, T::GroupMove, |ui| {
-                let button = big_button(ui, c, Icon::Folder, T::Move, has_selection, pick_first);
+                let button = big_button(ui, c, Icon::Move, T::Move, has_selection, pick_first);
                 egui::Popup::menu(&button).show(|ui| {
                     if let Some(a) = account
                         && let Some(cmd) = folder_menu(ui, c, a)
