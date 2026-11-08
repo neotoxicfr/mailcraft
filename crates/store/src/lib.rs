@@ -674,23 +674,62 @@ impl Store {
 
     /// Messages of the account matching every word of `query` (the last one as a prefix, so
     /// results follow typing), newest first, all folders.
+    /// Search across the account's folders. Besides words (full-text), the query understands
+    /// `de:`/`from:`, `objet:`/`subject:`, `pj`/`has:attachment`, `non-lu`/`is:unread`,
+    /// `suivi`/`is:flagged` (see [`Query`]).
     pub fn search(
         &self,
         account_id: i64,
         query: &str,
         limit: usize,
     ) -> Result<Vec<MessageSummary>> {
-        let Some(fts) = fts_query(query) else {
+        let q = Query::parse(query);
+        if q.is_empty() {
             return Ok(Vec::new());
+        }
+        let like = |t: &str| {
+            format!(
+                "%{}%",
+                t.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
         };
-        let mut st = self.conn.prepare(
+        let fts = fts_query(&q.words);
+        let mut sql = String::from(
             "SELECT m.account_id, m.id, m.folder_id, m.from_name, m.from_addr, m.subject, m.preview,
-                    m.received, m.is_read, m.has_attachments, m.flagged
-             FROM search JOIN messages m ON m.rowid = search.rowid
-             WHERE search MATCH ?2 AND m.account_id = ?1
-             ORDER BY m.received DESC LIMIT ?3",
-        )?;
-        let rows = st.query_map(params![account_id, fts, limit as i64], summary_from_row)?;
+                    m.received, m.is_read, m.has_attachments, m.flagged FROM ",
+        );
+        sql.push_str(if fts.is_some() {
+            "search JOIN messages m ON m.rowid = search.rowid WHERE search MATCH ?2 AND m.account_id = ?1"
+        } else {
+            "messages m WHERE ?2 IS NULL AND m.account_id = ?1"
+        });
+        let mut args: Vec<rusqlite::types::Value> = vec![account_id.into(), fts.into()];
+        for from in &q.from {
+            args.push(like(from).into());
+            let n = args.len();
+            sql.push_str(&format!(
+                " AND (m.from_name LIKE ?{n} ESCAPE '\\' OR m.from_addr LIKE ?{n} ESCAPE '\\')"
+            ));
+        }
+        for subject in &q.subject {
+            args.push(like(subject).into());
+            sql.push_str(&format!(" AND m.subject LIKE ?{} ESCAPE '\\'", args.len()));
+        }
+        if q.attachments {
+            sql.push_str(" AND m.has_attachments = 1");
+        }
+        if q.unread {
+            sql.push_str(" AND m.is_read = 0");
+        }
+        if q.flagged {
+            sql.push_str(" AND m.flagged = 1");
+        }
+        args.push((limit as i64).into());
+        sql.push_str(&format!(" ORDER BY m.received DESC LIMIT ?{}", args.len()));
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args), summary_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1151,6 +1190,64 @@ fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageSummary> {
     })
 }
 
+/// A search typed in the box, split into filters and plain words.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Query {
+    pub words: String,
+    pub from: Vec<String>,
+    pub subject: Vec<String>,
+    pub attachments: bool,
+    pub unread: bool,
+    pub flagged: bool,
+}
+
+impl Query {
+    /// `de:alex objet:"note de frais" pj non-lu facture` → filters + the word `facture`.
+    pub fn parse(text: &str) -> Self {
+        let mut q = Self::default();
+        let mut words = Vec::new();
+        let mut rest = text.trim();
+        while !rest.is_empty() {
+            // One token: up to the next space, or a quoted value after `key:`.
+            let (token, after) = match rest.find(':') {
+                Some(i) if !rest[..i].contains(' ') && rest[i + 1..].starts_with('"') => {
+                    let value = &rest[i + 2..];
+                    let end = value.find('"').unwrap_or(value.len());
+                    (&rest[..i + 2 + end], value.get(end + 1..).unwrap_or(""))
+                }
+                _ => match rest.find(' ') {
+                    Some(i) => (&rest[..i], &rest[i..]),
+                    None => (rest, ""),
+                },
+            };
+            rest = after.trim_start();
+            let lower = token.to_lowercase();
+            let value = |p: &str| token[p.len()..].trim_matches('"').to_owned();
+            match lower.as_str() {
+                "pj" | "has:attachment" | "has:attachments" | "avec:pj" => q.attachments = true,
+                "non-lu" | "nonlu" | "is:unread" => q.unread = true,
+                "suivi" | "is:flagged" | "drapeau" => q.flagged = true,
+                l if l.starts_with("de:") && l.len() > 3 => q.from.push(value("de:")),
+                l if l.starts_with("from:") && l.len() > 5 => q.from.push(value("from:")),
+                l if l.starts_with("objet:") && l.len() > 6 => q.subject.push(value("objet:")),
+                l if l.starts_with("subject:") && l.len() > 8 => q.subject.push(value("subject:")),
+                _ => words.push(token),
+            }
+        }
+        q.words = words.join(" ");
+        q
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words.trim().is_empty()
+            && self.from.is_empty()
+            && self.subject.is_empty()
+            && !self.attachments
+            && !self.unread
+            && !self.flagged
+    }
+}
+
 /// User text to an FTS5 query: each word quoted (so `-`, `*`, `NEAR`, `"`… are plain text), all
 /// words required, the last one as a prefix. `None` when there is nothing to look for.
 fn fts_query(text: &str) -> Option<String> {
@@ -1171,7 +1268,24 @@ fn fts_query(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::fts_query;
+    use super::{Query, fts_query};
+
+    #[test]
+    fn search_filters_are_read_from_the_query() {
+        let q = Query::parse(r#"de:alex objet:"note de frais" pj non-lu facture mars"#);
+        assert_eq!(q.from, ["alex"]);
+        assert_eq!(q.subject, ["note de frais"]);
+        assert!(q.attachments && q.unread && !q.flagged);
+        assert_eq!(q.words, "facture mars");
+        let q = Query::parse("from:Shop is:flagged");
+        assert_eq!(
+            (q.from[0].as_str(), q.flagged, q.words.as_str()),
+            ("Shop", true, "")
+        );
+        // A word that merely contains a colon stays a word.
+        assert_eq!(Query::parse("12:30").words, "12:30");
+        assert!(Query::parse("   ").is_empty());
+    }
 
     #[test]
     fn fts_query_quotes_every_word() {

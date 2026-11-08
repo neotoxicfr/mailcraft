@@ -76,6 +76,7 @@ pub enum T {
     Favorites,
     NoAccount,
     SearchHint,
+    SearchFilters,
     EmptyList,
     ReadingEmpty,
     NoSubject,
@@ -354,6 +355,10 @@ impl T {
                 "No account.\nFile › Add Account",
             ),
             Self::SearchHint => ("Rechercher dans la boîte aux lettres", "Search the mailbox"),
+            Self::SearchFilters => (
+                "Filtres : de:nom  objet:mot  pj (pièce jointe)  non-lu  suivi\nExemple : de:alex objet:\"note de frais\" pj",
+                "Filters: from:name  subject:word  has:attachment  is:unread  is:flagged\nExample: from:alex subject:\"expense report\" has:attachment",
+            ),
             Self::EmptyList => (
                 "Aucun élément à afficher dans cette vue.",
                 "There are no items to show in this view.",

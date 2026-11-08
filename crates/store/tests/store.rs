@@ -243,9 +243,28 @@ fn full_text_search_ignores_accents_and_follows_changes() {
     assert_eq!(ids(&s, "reunion"), ["b"]); // every folder
     assert_eq!(ids(&s, "example"), ["b", "a"]); // sender address, newest first
     assert!(ids(&s, "facture lundi").is_empty()); // all words required
-    for trap in ["\"", "*", "-", "NEAR", "a OR", "(", "facture\"", "AND NOT"] {
+    for trap in [
+        "\"",
+        "*",
+        "-",
+        "NEAR",
+        "a OR",
+        "(",
+        "facture\"",
+        "AND NOT",
+        "de:%",
+        "objet:_",
+    ] {
         s.search(1, trap, 50).unwrap();
     }
+    // Filters, alone or with words.
+    assert_eq!(ids(&s, "objet:réunion"), ["b"]);
+    assert_eq!(ids(&s, "objet:réunion facture"), Vec::<String>::new());
+    assert_eq!(ids(&s, "de:example facture"), ["a"]);
+    assert_eq!(ids(&s, "non-lu"), ["b", "a"]);
+    s.set_read(1, "a", true).unwrap();
+    assert_eq!(ids(&s, "non-lu"), ["b"]);
+    assert!(ids(&s, "de:%").is_empty()); // % is a plain character, not a wildcard
 
     s.put_body(
         1,

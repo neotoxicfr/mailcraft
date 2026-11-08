@@ -296,11 +296,13 @@ pub fn message_list(
     dark: bool,
     command: &mut Option<Command>,
 ) {
-    let search = ui.add(
-        TextEdit::singleline(&mut view.search)
-            .hint_text(T::SearchHint.get(c.lang))
-            .desired_width(f32::INFINITY),
-    );
+    let search = ui
+        .add(
+            TextEdit::singleline(&mut view.search)
+                .hint_text(T::SearchHint.get(c.lang))
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_text(T::SearchFilters.get(c.lang));
     if search.changed() {
         *command = Some(Command::SearchChanged);
     }
