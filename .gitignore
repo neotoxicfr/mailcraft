@@ -11,6 +11,9 @@
 *.p12
 *.pfx
 token*.json
+# Google desktop client (sign-in identifiers)
+google-client.json
+client_secret*.json
 *.db
 *.sqlite
 *.sqlite3

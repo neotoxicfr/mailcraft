@@ -9,6 +9,9 @@ description = "MailCraft background worker: sign-in, mailbox sync and on-demand 
 [lints]
 workspace = true
 
+[build-dependencies]
+serde_json = { workspace = true }
+
 [dependencies]
 mailcraft-store = { workspace = true }
 mailcraft-graph = { workspace = true }

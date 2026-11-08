@@ -1,8 +1,7 @@
 //! Gmail through the browser sign-in (OAuth), instead of an app password.
 //!
-//! The Google project identifiers are not in the source: they are read when MailCraft is built,
-//! from the `MAILCRAFT_GOOGLE_CLIENT_ID` and `MAILCRAFT_GOOGLE_CLIENT_SECRET` environment
-//! variables (a GitHub secret for release builds, a local variable for a development build).
+//! The Google project identifiers are not in the source: they are read when MailCraft is built
+//! (see `build.rs`: environment variables, or a `google-client.json` file kept out of git).
 //! Without them the Google button stays hidden and Gmail works with an app password.
 
 use std::time::Instant;
@@ -15,8 +14,15 @@ use crate::{Event, Runner};
 
 const CLIENT_ID: Option<&str> = option_env!("MAILCRAFT_GOOGLE_CLIENT_ID");
 const CLIENT_SECRET: Option<&str> = option_env!("MAILCRAFT_GOOGLE_CLIENT_SECRET");
-/// Full mail access over IMAP/SMTP, and the address and name of the account.
-const SCOPES: &str = "https://mail.google.com/ openid email profile";
+/// Full mail access over IMAP/SMTP, contacts (and the people written to), calendar, and the
+/// address and name of the account: asked once, so contacts and calendar need no new consent.
+const SCOPES: &str = concat!(
+    "https://mail.google.com/ ",
+    "https://www.googleapis.com/auth/contacts ",
+    "https://www.googleapis.com/auth/contacts.other.readonly ",
+    "https://www.googleapis.com/auth/calendar ",
+    "openid email profile"
+);
 
 /// This build can sign in to Google.
 pub fn configured() -> bool {
@@ -116,5 +122,21 @@ impl Runner {
         let access = tokens.access.clone();
         self.tokens.insert(account_id, tokens);
         Ok(access)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn scopes_are_single_spaced() {
+        assert!(!super::SCOPES.contains("  ") && !super::SCOPES.ends_with(' '));
+        assert_eq!(super::SCOPES.split(' ').count(), 7);
+    }
+
+    /// Built with google-client.json (or the variables) present: the identifiers are in.
+    #[test]
+    #[ignore = "needs google-client.json at build time"]
+    fn identifiers_come_from_the_build() {
+        assert!(super::configured());
     }
 }
