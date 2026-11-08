@@ -1171,13 +1171,38 @@ impl Runner {
             return self.imap_refresh_folders(account_id, emit);
         }
         if !self.roles.contains_key(&account_id) {
+            // The six well-known folders asked at once (one request each); any failure: asked
+            // again one by one, with the token refresh and error handling of with_graph.
+            let token = self.access_token(account_id, false)?;
+            let http = &self.http;
+            let found: Vec<Option<(String, &str)>> = std::thread::scope(|scope| {
+                let asks: Vec<_> = ROLES
+                    .iter()
+                    .map(|role| {
+                        let token = token.as_str();
+                        scope.spawn(move || {
+                            Graph::new(http, token)
+                                .well_known_id(role)
+                                .ok()
+                                .map(|id| id.map(|id| (id, *role)))
+                        })
+                    })
+                    .collect();
+                asks.into_iter()
+                    .map(|h| h.join().ok().flatten().unwrap_or(None))
+                    .collect()
+            });
             let mut roles = HashMap::new();
-            for role in ROLES {
-                if let Some(id) = self.with_graph(account_id, |g| g.well_known_id(role))? {
-                    roles.insert(id, role.to_owned());
+            for (role, got) in ROLES.iter().zip(found) {
+                let id = match got {
+                    Some((id, _)) => Some(id),
+                    None => self.with_graph(account_id, |g| g.well_known_id(role))?,
+                };
+                if let Some(id) = id {
+                    roles.insert(id, (*role).to_owned());
                 }
-                self.serve_urgent(emit);
             }
+            self.serve_urgent(emit);
             self.roles.insert(account_id, roles);
         }
         let roles = self.roles[&account_id].clone();
@@ -1212,7 +1237,7 @@ impl Runner {
             return self.imap_sync_inbox(account_id, false, emit);
         }
         match self.inbox_of(account_id)? {
-            Some(f) => self.sync_folder(account_id, &f, emit),
+            Some(f) => self.sync_folder(account_id, &f, None, emit),
             None => Ok(()),
         }
     }
@@ -1738,17 +1763,69 @@ impl Runner {
                 .and_then(|r| ROLES.iter().position(|x| *x == r))
                 .unwrap_or(ROLES.len())
         });
+        let mut first = self.first_pages(account_id, &order);
         for folder in order {
-            self.sync_folder(account_id, folder, emit)?;
+            let page = first.remove(&folder.id);
+            self.sync_folder(account_id, folder, page, emit)?;
             self.serve_urgent(emit);
         }
         Ok(())
     }
 
+    /// The first delta page of every folder, asked four at a time: when nothing changed it is
+    /// the only request a folder needs (about 0.5 s each, one after the other before). A folder
+    /// whose request fails is left out and synced the usual way.
+    fn first_pages(
+        &mut self,
+        account_id: i64,
+        folders: &[&Folder],
+    ) -> HashMap<String, mailcraft_graph::DeltaPage> {
+        const LANES: usize = 4;
+        let since = unix_now() - i64::from(self.config.months) * 30 * 24 * 3600;
+        let urls: Vec<(String, String)> = folders
+            .iter()
+            .map(|f| {
+                let url = self
+                    .store
+                    .delta_link(account_id, &f.id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| Graph::delta_start(&f.id, since));
+                (f.id.clone(), url)
+            })
+            .collect();
+        let Ok(token) = self.access_token(account_id, false) else {
+            return HashMap::new();
+        };
+        let (http, token, urls) = (&self.http, token.as_str(), &urls);
+        std::thread::scope(|scope| {
+            let lanes: Vec<_> = (0..LANES)
+                .map(|lane| {
+                    scope.spawn(move || {
+                        let graph = Graph::new(http, token);
+                        urls.iter()
+                            .skip(lane)
+                            .step_by(LANES)
+                            .filter_map(|(id, url)| {
+                                graph.delta_page(url).ok().map(|p| (id.clone(), p))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            lanes
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_default())
+                .collect()
+        })
+    }
+
+    /// Syncs one folder through its delta pages; `first`: its first page, already fetched.
     fn sync_folder(
         &mut self,
         account_id: i64,
         folder: &Folder,
+        mut first: Option<mailcraft_graph::DeltaPage>,
         emit: &dyn Fn(Event),
     ) -> Result<(), String> {
         let since = unix_now() - i64::from(self.config.months) * 30 * 24 * 3600;
@@ -1761,10 +1838,14 @@ impl Runner {
         let mut count = 0;
         let mut reset = false;
         loop {
-            let page = match self.with_graph(account_id, |g| match g.delta_page(&url) {
-                Err(GraphError::SyncReset) => Ok(None),
-                r => r.map(Some),
-            })? {
+            let fetched = match first.take() {
+                Some(page) => Some(page),
+                None => self.with_graph(account_id, |g| match g.delta_page(&url) {
+                    Err(GraphError::SyncReset) => Ok(None),
+                    r => r.map(Some),
+                })?,
+            };
+            let page = match fetched {
                 Some(p) => p,
                 None if !reset => {
                     reset = true;
