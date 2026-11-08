@@ -308,16 +308,18 @@ impl MailCraftApp {
         if self.integrations {
             self.remember_window(ui.ctx());
         }
-        let prefs = self.settings.get().clone();
-        if self.applied.as_ref() != Some(&prefs.appearance) {
-            theme::apply(ui.ctx(), &prefs.appearance);
-            self.applied = Some(prefs.appearance.clone());
+        if self.applied.as_ref() != Some(&self.settings.get().appearance) {
+            let appearance = self.settings.get().appearance.clone();
+            theme::apply(ui.ctx(), &appearance);
+            self.applied = Some(appearance);
         }
         self.background(ui.ctx());
 
-        let mut next = prefs.clone();
+        // One copy per frame: the one the window may change (the settings are read in place).
+        let mut next = self.settings.get().clone();
         // Scoped: the context borrows the store and the mail only while the window is drawn.
         let command = {
+            let prefs = self.settings.get();
             let store = self.backend.as_ref().map(|b| &b.store);
             let suggest = store.map(suggester);
             let accent_fill = theme::accent_fill(prefs.appearance.accent);
@@ -336,7 +338,8 @@ impl MailCraftApp {
             };
             shell::show(ui, &c, &mut self.view, &mut next)
         };
-        if next != prefs {
+        let prefs = self.settings.get();
+        if next != *prefs {
             if next.rules != prefs.rules || next.away != prefs.away {
                 self.send(Request::SetAutomation {
                     rules: next.rules.clone(),
@@ -352,8 +355,11 @@ impl MailCraftApp {
             }
         }
         let mut command = command.and_then(|cmd| self.run(cmd));
-        if let Some(cmd) = self.composer_windows(ui.ctx(), &prefs) {
-            command = self.run(cmd).or(command);
+        if self.view.composers.iter().any(|k| k.detached) {
+            let prefs = self.settings.get().clone();
+            if let Some(cmd) = self.composer_windows(ui.ctx(), &prefs) {
+                command = self.run(cmd).or(command);
+            }
         }
         self.autosave_drafts();
         if self.view.composers.iter().any(|k| k.changed_at.is_some()) {
