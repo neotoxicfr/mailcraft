@@ -11,6 +11,8 @@ use reqwest::blocking::{Client, RequestBuilder};
 use serde_json::Value;
 
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
+/// Changes per JSON batch request (Graph's limit).
+pub const BATCH: usize = 20;
 // Immutable ids: a message keeps its id when moved between folders.
 const PREFER: &str = "odata.maxpagesize=100, IdType=\"ImmutableId\"";
 const MESSAGE_FIELDS: &str =
@@ -343,6 +345,79 @@ impl<'a> Graph<'a> {
                 None => req,
             }
         })
+    }
+
+    /// Up to [`BATCH`] changes in one request (Graph JSON batching); one result per change,
+    /// in order. Throttled changes come back as `Network` (to try again later).
+    pub fn apply_batch(&self, ops: &[Op<'_>]) -> Result<Vec<Result<()>>> {
+        use serde_json::json;
+        let requests: Vec<Value> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| {
+                let (method, url, body) = op.request();
+                let mut r = json!({
+                    "id": i.to_string(),
+                    "method": method.as_str(),
+                    "url": url.strip_prefix(GRAPH).unwrap_or(&url),
+                    "headers": { "Prefer": "IdType=\"ImmutableId\"" },
+                });
+                if let Some(b) = body {
+                    r["body"] = b;
+                    r["headers"]["Content-Type"] = json!("application/json");
+                }
+                r
+            })
+            .collect();
+        let mut out: Vec<Result<()>> = (0..ops.len())
+            .map(|_| Err(GraphError::Network("no answer in the batch".into())))
+            .collect();
+        // The server runs a batch's changes side by side and throttles some of them (a mailbox
+        // takes only a few at once): those are sent again after the wait it asks for.
+        let mut todo: Vec<usize> = (0..ops.len()).collect();
+        for round in 0..8u32 {
+            let batch: Vec<&Value> = todo.iter().map(|&i| &requests[i]).collect();
+            let v = self.send(|| {
+                self.http
+                    .post(format!("{GRAPH}/$batch"))
+                    .json(&json!({ "requests": batch }))
+            })?;
+            let mut again = Vec::new();
+            let mut wait = 0u64;
+            for r in v["responses"].as_array().into_iter().flatten() {
+                let Some(i) = r["id"].as_str().and_then(|i| i.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let status = r["status"].as_u64().unwrap_or(0) as u16;
+                let message = r["body"]["error"]["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                if matches!(status, 429 | 503 | 504) || (status == 412 && round == 0) {
+                    let asked = r["headers"]["Retry-After"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1u64 << round.min(4));
+                    wait = wait.max(asked);
+                    again.push(i);
+                }
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = match status {
+                        200..=299 => Ok(()),
+                        404 => Err(GraphError::NotFound),
+                        401 => Err(GraphError::Unauthorized),
+                        429 | 503 | 504 => Err(GraphError::Network(format!("busy ({status})"))),
+                        _ => Err(GraphError::Api(status, message)),
+                    };
+                }
+            }
+            if again.is_empty() {
+                break;
+            }
+            todo = again;
+            std::thread::sleep(Duration::from_secs(wait.clamp(1, 30)));
+        }
+        Ok(out)
     }
 
     /// Searches the whole mailbox on the server (older mail included): (folder id, message).

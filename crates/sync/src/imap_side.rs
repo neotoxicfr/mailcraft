@@ -7,7 +7,7 @@ use mailcraft_graph::compose::Outgoing;
 use mailcraft_imap::{Error as ImapError, Imap, Server, mime, smtp};
 use mailcraft_store::{Attachment, Folder, MessageBody, MessageSummary};
 
-use crate::{Compose, Event, MAX_IMAGE, PendingOp, Runner, unix_now};
+use crate::{Compose, Event, MAX_IMAGE, Runner, unix_now};
 
 /// The largest number of messages a server search adds to the local copy.
 const SEARCH_LIMIT: usize = 100;
@@ -505,15 +505,6 @@ impl Runner {
     ) -> Result<Vec<u8>, String> {
         let raw = self.raw(account_id, message_id)?;
         mime::part_bytes(&raw, attachment_id).ok_or_else(|| "attachment not found".to_owned())
-    }
-
-    pub(crate) fn imap_apply(&mut self, account_id: i64, op: &PendingOp) -> Result<(), ImapError> {
-        self.try_imap(account_id, |s| match op {
-            PendingOp::Move { id, dest } => s.move_to(id, dest),
-            PendingOp::Delete { id } => s.delete(id),
-            PendingOp::SetRead { id, read } => s.set_flag(id, "\\Seen", *read),
-            PendingOp::SetFlag { id, flagged } => s.set_flag(id, "\\Flagged", *flagged),
-        })
     }
 
     /// Full name for a folder named `name` under `parent`.

@@ -201,7 +201,37 @@ enum PendingOp {
     SetFlag { id: String, flagged: bool },
 }
 
+/// How one change ended, for the pending queue.
+enum Outcome {
+    /// Done, or nothing left to do (the message is gone).
+    Done,
+    /// Not reachable now: kept for later.
+    Later(String),
+    /// The server refused it: dropped, a sync puts the local copy right.
+    Refused(String),
+}
+
 impl PendingOp {
+    fn id(&self) -> &str {
+        match self {
+            Self::Move { id, .. }
+            | Self::Delete { id }
+            | Self::SetRead { id, .. }
+            | Self::SetFlag { id, .. } => id,
+        }
+    }
+
+    /// Changes that can go in one IMAP command: same kind, same destination or value.
+    fn same_kind(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Move { dest: a, .. }, Self::Move { dest: b, .. }) => a == b,
+            (Self::Delete { .. }, Self::Delete { .. }) => true,
+            (Self::SetRead { read: a, .. }, Self::SetRead { read: b, .. }) => a == b,
+            (Self::SetFlag { flagged: a, .. }, Self::SetFlag { flagged: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+
     fn op(&self) -> Op<'_> {
         match self {
             Self::Move { id, dest } => Op::Move { id, dest },
@@ -595,20 +625,17 @@ impl Runner {
                     let folder = folder_id.clone();
                     self.with_imap(account_id, |s| s.empty(&folder, dest.as_deref()))?;
                 } else {
+                    // Every message id, then the changes in batches (20 per request, four
+                    // requests at a time) through the pending queue.
                     let ids = self.with_graph(account_id, |g| g.folder_message_ids(&folder_id))?;
-                    for (i, id) in ids.iter().enumerate() {
-                        let op = match &dest {
-                            Some(d) => Op::Move { id, dest: d },
-                            None => Op::Delete { id },
-                        };
-                        match self.try_graph(account_id, |g| g.apply(&op)) {
-                            Ok(_) | Err(GraphError::NotFound) => {}
-                            Err(e) => return Err(e.to_string()),
-                        }
-                        if i % 20 == 19 {
-                            self.serve_urgent(emit);
-                        }
-                    }
+                    let ops = ids.into_iter().map(|id| match &dest {
+                        Some(d) => PendingOp::Move {
+                            id,
+                            dest: d.clone(),
+                        },
+                        None => PendingOp::Delete { id },
+                    });
+                    self.queue(account_id, ops, emit)?;
                 }
                 // The local copy follows: the folder emptied, Deleted Items filled.
                 let local: Vec<String> = self
@@ -974,8 +1001,6 @@ impl Runner {
         self.flush_pending(emit)
     }
 
-    /// Sends pending changes in order. A network failure keeps them for the next sync; a change
-    /// the server refuses is dropped and the folders are synced again so the local copy matches.
     /// Requests about an IMAP account go to its own code. Gives back the others.
     fn handle_imap(
         &mut self,
@@ -1082,48 +1107,139 @@ impl Runner {
         Ok(None)
     }
 
+    /// Sends pending changes, grouped (batches for Microsoft, one command per folder for IMAP).
+    /// A network failure keeps them for the next sync; a change the server refuses is dropped
+    /// and the folders are synced again so the local copy matches.
     fn flush_pending(&mut self, emit: &dyn Fn(Event)) -> Result<(), String> {
-        let mut refused = Vec::new();
+        let mut by_account: Vec<(i64, Vec<(i64, PendingOp)>)> = Vec::new();
         for (pid, account_id, json) in self.store.pending().map_err(|e| e.to_string())? {
             let Ok(op) = serde_json::from_str::<PendingOp>(&json) else {
                 self.store.drop_pending(pid).map_err(|e| e.to_string())?;
                 continue;
             };
-            let result = if self.is_imap(account_id) {
-                match self.imap_apply(account_id, &op) {
-                    Ok(()) | Err(mailcraft_imap::Error::NotFound) => Ok(()),
-                    Err(mailcraft_imap::Error::Network(e)) => Err((true, e)),
-                    Err(e) => Err((false, e.to_string())),
-                }
-            } else {
-                match self.try_graph(account_id, |g| g.apply(&op.op())) {
-                    Ok(_) | Err(GraphError::NotFound) => Ok(()),
-                    Err(GraphError::Network(e)) => Err((true, e)),
-                    Err(e) => Err((false, e.to_string())),
-                }
-            };
-            match result {
-                Ok(()) => {}
-                Err((true, e)) => {
-                    emit(Event::Offline {
-                        pending: self.store.pending().map_or(0, |p| p.len()),
-                        reason: e,
-                    });
-                    return Ok(());
-                }
-                Err((false, e)) => {
-                    refused.push(account_id);
-                    emit(Event::Error(e));
-                }
+            match by_account.iter_mut().find(|(a, _)| *a == account_id) {
+                Some((_, ops)) => ops.push((pid, op)),
+                None => by_account.push((account_id, vec![(pid, op)])),
             }
-            self.store.drop_pending(pid).map_err(|e| e.to_string())?;
+        }
+        let mut refused: Option<(String, usize)> = None;
+        let mut later = None;
+        for (account_id, ops) in by_account {
+            let outcomes = if self.is_imap(account_id) {
+                self.imap_apply_all(account_id, &ops)
+            } else {
+                self.graph_apply_all(account_id, &ops)
+            };
+            for (pid, outcome) in outcomes {
+                match outcome {
+                    Outcome::Done => {}
+                    Outcome::Later(e) => {
+                        later = Some(e);
+                        continue;
+                    }
+                    Outcome::Refused(e) => {
+                        refused.get_or_insert((e, 0)).1 += 1;
+                    }
+                }
+                self.store.drop_pending(pid).map_err(|e| e.to_string())?;
+            }
+        }
+        // One message for a whole refused batch, not one per mail.
+        if let Some((e, n)) = &refused {
+            emit(Event::Error(if *n > 1 {
+                format!("{e} (×{n})")
+            } else {
+                e.clone()
+            }));
+        }
+        if let Some(reason) = later {
+            emit(Event::Offline {
+                pending: self.store.pending().map_or(0, |p| p.len()),
+                reason,
+            });
         }
         // A refused change: the local copy is wrong somewhere, a full sync puts it right. Asked
         // for after the current work, never as a sync inside a sync.
-        if !refused.is_empty() {
+        if refused.is_some() {
             self.defer(Request::SyncAll);
         }
         Ok(())
+    }
+
+    /// Changes to a Microsoft mailbox, 20 per batch request, one request at a time (the server
+    /// already runs a batch's changes side by side, and throttles a mailbox beyond that). Two
+    /// changes to the same message never share a batch, so they keep their order.
+    fn graph_apply_all(
+        &mut self,
+        account_id: i64,
+        ops: &[(i64, PendingOp)],
+    ) -> Vec<(i64, Outcome)> {
+        let mut chunks: Vec<Vec<&(i64, PendingOp)>> = Vec::new();
+        for item in ops {
+            match chunks.last_mut() {
+                Some(c)
+                    if c.len() < mailcraft_graph::BATCH
+                        && c.iter().all(|(_, o)| o.id() != item.1.id()) =>
+                {
+                    c.push(item);
+                }
+                _ => chunks.push(vec![item]),
+            }
+        }
+        let mut out = Vec::with_capacity(ops.len());
+        for chunk in chunks {
+            let batch: Vec<Op<'_>> = chunk.iter().map(|(_, op)| op.op()).collect();
+            let results = match self.try_graph(account_id, |g| g.apply_batch(&batch)) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    (0..chunk.len())
+                        .map(|_| Err(GraphError::Network(msg.clone())))
+                        .collect()
+                }
+            };
+            for ((pid, _), r) in chunk.iter().zip(results) {
+                let outcome = match r {
+                    Ok(()) | Err(GraphError::NotFound) => Outcome::Done,
+                    Err(GraphError::Network(e)) => Outcome::Later(e),
+                    Err(GraphError::Unauthorized) => {
+                        Outcome::Later("session expired: sign in again".into())
+                    }
+                    Err(e) => Outcome::Refused(e.to_string()),
+                };
+                out.push((*pid, outcome));
+            }
+        }
+        out
+    }
+
+    /// Changes to an IMAP mailbox: consecutive changes of the same kind go in one command per
+    /// folder (a thousand messages deleted in a few commands, not a thousand).
+    fn imap_apply_all(&mut self, account_id: i64, ops: &[(i64, PendingOp)]) -> Vec<(i64, Outcome)> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut start = 0;
+        while start < ops.len() {
+            let mut end = start + 1;
+            while end < ops.len() && ops[end].1.same_kind(&ops[start].1) {
+                end += 1;
+            }
+            let run = &ops[start..end];
+            let ids: Vec<String> = run.iter().map(|(_, op)| op.id().to_owned()).collect();
+            let result = self.try_imap(account_id, |s| match &run[0].1 {
+                PendingOp::Move { dest, .. } => s.move_many(&ids, dest),
+                PendingOp::Delete { .. } => s.delete_many(&ids),
+                PendingOp::SetRead { read, .. } => s.set_flag_many(&ids, "\\Seen", *read),
+                PendingOp::SetFlag { flagged, .. } => s.set_flag_many(&ids, "\\Flagged", *flagged),
+            });
+            let outcome = |r: &Result<(), mailcraft_imap::Error>| match r {
+                Ok(()) | Err(mailcraft_imap::Error::NotFound) => Outcome::Done,
+                Err(mailcraft_imap::Error::Network(e)) => Outcome::Later(e.clone()),
+                Err(e) => Outcome::Refused(e.to_string()),
+            };
+            out.extend(run.iter().map(|(p, _)| (*p, outcome(&result))));
+            start = end;
+        }
+        out
     }
 
     fn add_account(&mut self, emit: &dyn Fn(Event)) -> Result<(), String> {
@@ -1664,25 +1780,12 @@ impl Runner {
                         .map(|(id, _)| id)
                         .collect();
                     if !dry_run {
-                        for id in &ids {
-                            if imap {
-                                let op = PendingOp::Move {
-                                    id: id.clone(),
-                                    dest: dest.clone(),
-                                };
-                                match self.imap_apply(account_id, &op) {
-                                    Ok(()) | Err(mailcraft_imap::Error::NotFound) => {}
-                                    Err(e) => return Err(e.to_string()),
-                                }
-                                continue;
-                            }
-                            match self
-                                .try_graph(account_id, |g| g.apply(&Op::Move { id, dest: &dest }))
-                            {
-                                Ok(_) | Err(GraphError::NotFound) => {}
-                                Err(e) => return Err(e.to_string()),
-                            }
-                        }
+                        // Grouped: batches for Microsoft, one command per folder for IMAP.
+                        let ops = ids.iter().map(|id| PendingOp::Move {
+                            id: id.clone(),
+                            dest: dest.clone(),
+                        });
+                        self.queue(account_id, ops, emit)?;
                         self.store
                             .move_local(account_id, &ids, &dest)
                             .map_err(|e| e.to_string())?;

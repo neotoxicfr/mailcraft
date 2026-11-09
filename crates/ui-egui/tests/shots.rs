@@ -193,7 +193,8 @@ fn shots() {
         h.run();
         h.get_by_label("Alex Dupont — Réunion de jeudi").click();
         save(&mut h, &format!("1-lecture-{theme}"));
-        h.get_by_label("Alex Dupont — Réunion de jeudi").click_secondary();
+        h.get_by_label("Alex Dupont — Réunion de jeudi")
+            .click_secondary();
         save(&mut h, &format!("6-menu-message-{theme}"));
         h.key_press(egui::Key::Escape);
         h.get_by_label("Voyages").click_secondary();

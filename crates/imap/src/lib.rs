@@ -681,6 +681,91 @@ impl Imap {
         Ok(())
     }
 
+    /// The messages grouped by folder (for one command per folder); messages whose folder was
+    /// renumbered since (uidvalidity) are left out: they are not there any more.
+    fn by_mailbox(&mut self, ids: &[String]) -> Result<Vec<(String, Vec<u32>)>> {
+        let mut groups: Vec<(String, u32, Vec<u32>)> = Vec::new();
+        for id in ids {
+            let Some((validity, uid, mailbox)) = parse_id(id) else {
+                continue;
+            };
+            match groups
+                .iter_mut()
+                .find(|(m, v, _)| m == mailbox && *v == validity)
+            {
+                Some((_, _, uids)) => uids.push(uid),
+                None => groups.push((mailbox.to_owned(), validity, vec![uid])),
+            }
+        }
+        let mut out = Vec::new();
+        for (mailbox, validity, uids) in groups {
+            match self.select(&mailbox) {
+                Ok(m) if m.uid_validity.is_none_or(|v| v == validity) => out.push((mailbox, uids)),
+                Ok(_) | Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Several messages moved to `dest`: one command per source folder.
+    pub fn move_many(&mut self, ids: &[String], dest: &str) -> Result<()> {
+        for (mailbox, uids) in self.by_mailbox(ids)? {
+            if mailbox == dest {
+                continue;
+            }
+            self.ensure_selected(&mailbox)?;
+            for chunk in uids.chunks(CHUNK * 5) {
+                let set = uid_set(chunk);
+                if self.can_move {
+                    self.session.uid_mv(&set, dest).map_err(Error::from)?;
+                } else {
+                    self.session
+                        .uid_copy(&set, quote(dest))
+                        .map_err(Error::from)?;
+                    self.session
+                        .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+                        .map_err(Error::from)?;
+                    if self.session.uid_expunge(&set).is_err() {
+                        self.session.expunge().map_err(Error::from)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Several messages deleted for good: one command per folder.
+    pub fn delete_many(&mut self, ids: &[String]) -> Result<()> {
+        for (mailbox, uids) in self.by_mailbox(ids)? {
+            self.ensure_selected(&mailbox)?;
+            for chunk in uids.chunks(CHUNK * 5) {
+                let set = uid_set(chunk);
+                self.session
+                    .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+                    .map_err(Error::from)?;
+                if self.session.uid_expunge(&set).is_err() {
+                    self.session.expunge().map_err(Error::from)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A flag set or cleared on several messages: one command per folder.
+    pub fn set_flag_many(&mut self, ids: &[String], flag: &str, on: bool) -> Result<()> {
+        let sign = if on { '+' } else { '-' };
+        for (mailbox, uids) in self.by_mailbox(ids)? {
+            self.ensure_selected(&mailbox)?;
+            for chunk in uids.chunks(CHUNK * 5) {
+                self.session
+                    .uid_store(uid_set(chunk), format!("{sign}FLAGS.SILENT ({flag})"))
+                    .map_err(Error::from)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete(&mut self, id: &str) -> Result<()> {
         let Some(uid) = self.locate(id)? else {
             return Err(Error::NotFound);
