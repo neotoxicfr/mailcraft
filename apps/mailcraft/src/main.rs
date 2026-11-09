@@ -15,6 +15,9 @@ struct App {
     ui: MailCraftApp,
     /// The window is hidden in the notification area.
     hidden: bool,
+    /// Started hidden from a maximised window: maximised when first shown (maximising a
+    /// hidden window would show it at once).
+    maximize_on_show: bool,
     /// Leaving for real (File › Exit or the tray menu), not hiding.
     quitting: bool,
     #[cfg(windows)]
@@ -29,6 +32,9 @@ impl App {
     fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        if std::mem::take(&mut self.maximize_on_show) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
@@ -129,7 +135,7 @@ fn main() -> eframe::Result {
                 height: 64,
             })
             .with_inner_size(size)
-            .with_maximized(place.maximized)
+            .with_maximized(place.maximized && !start_hidden)
             .with_min_inner_size([900.0, 520.0])
             .with_visible(!start_hidden),
         ..Default::default()
@@ -141,6 +147,7 @@ fn main() -> eframe::Result {
             let ui = MailCraftApp::new(&cc.egui_ctx);
             Ok(Box::new(App {
                 hidden: start_hidden,
+                maximize_on_show: start_hidden && place.maximized,
                 quitting: false,
                 #[cfg(windows)]
                 tray: desktop::Tray::new(&cc.egui_ctx, ui.french()),
