@@ -92,19 +92,19 @@ impl eframe::App for App {
             let want = if self.hidden {
                 None
             } else {
-                // The native view sits above everything egui draws: hidden while a menu
-                // (right-click, drop-down) overlaps it, or the menu would be under it.
-                self.ui.original_view().filter(|(rect, _)| {
-                    !ui.ctx().memory(|m| {
-                        m.areas().visible_layer_ids().into_iter().any(|l| {
-                            l.order == egui::Order::Foreground
-                                && m.area_rect(l.id).is_some_and(|r| r.intersects(*rect))
-                        })
-                    })
-                })
+                self.ui.original_view()
             };
+            // Open menus and tooltips: cut out of the original view so they show over it.
+            let menus: Vec<egui::Rect> = ui.ctx().memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|l| matches!(l.order, egui::Order::Foreground | egui::Order::Tooltip))
+                    .filter_map(|l| m.area_rect(l.id))
+                    .collect()
+            });
             self.original
-                .update(frame, ui.ctx().pixels_per_point(), want);
+                .update(frame, ui.ctx().pixels_per_point(), want, &menus);
             if self.original.failed() {
                 self.ui.original_unavailable();
             }

@@ -17,6 +17,8 @@ log = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 # Original view of a message: Edge WebView2 as a child of the main window.
 wry = { workspace = true }
+# Safe Win32 calls: cuts the menus out of the original view (a native window over ours).
+winsafe = { version = "0.0.29", features = ["gdi", "user", "kernel"] }
 open = { workspace = true }
 # Notification-area icon (with its menu) and new-mail notifications.
 tray-icon = "0.26"
