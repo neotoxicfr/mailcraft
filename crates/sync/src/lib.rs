@@ -801,11 +801,12 @@ impl Runner {
                 ids,
                 dest,
             } => {
-                let moved = self
-                    .store
+                // The app has usually moved them in the local copy already (shown at once):
+                // every message goes to the server, moved here or not.
+                self.store
                     .move_local(account_id, &ids, &dest)
                     .map_err(|e| e.to_string())?;
-                let ops = moved.into_iter().map(|(id, _)| PendingOp::Move {
+                let ops = ids.into_iter().map(|id| PendingOp::Move {
                     id,
                     dest: dest.clone(),
                 });

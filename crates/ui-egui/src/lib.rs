@@ -1011,18 +1011,19 @@ impl MailCraftApp {
         }
     }
 
-    /// A mailbox change: through the worker (local first, then the server), or straight into
-    /// the store when there is no worker (tests).
+    /// A mailbox change: shown at once in the local copy (like Outlook, without waiting for the
+    /// worker, which may be in the middle of a sync), then sent to the server by the worker.
     fn act(&mut self, request: Request) {
-        if self.worker().is_some() {
-            self.send(request);
-            return;
-        }
+        self.apply_local(&request);
+        self.send(request);
+    }
+
+    fn apply_local(&mut self, request: &Request) {
         let Some(b) = self.backend.as_mut() else {
             return;
         };
         let store = &mut b.store;
-        let result = match &request {
+        let result = match request {
             Request::Move {
                 account_id,
                 ids,
