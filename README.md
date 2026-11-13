@@ -1,5 +1,10 @@
 # MailCraft
 
+> **This project is archived and no longer maintained.** Development continues in
+> **[UCS-Care-Group/mailcraft](https://github.com/UCS-Care-Group/mailcraft)**, an open-source,
+> clean-room mail, calendar and contacts program in Rust. Please use and contribute to that
+> one. The code below stays available under its licence, as it was.
+
 An open-source desktop mail client for Windows, in pure Rust, in the spirit of the
 [ArtCraft Crafting Apps](https://github.com/storytold): the familiar look of Outlook (classic
 ribbon, three panes), built only from free resources.
